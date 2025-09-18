@@ -63,6 +63,7 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "policies"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "guardrails.yml"), _stub.GuardrailsYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "labels.yml"), _stub.LabelsPolicyYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
+        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "images.yml"), _stub.ImagesPolicyYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
 
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "checks"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "checks", "compose-v3.yml"), _stub.ComposeV3Yaml, dry, quiet, ct); Tally(r1, ref c, ref s);

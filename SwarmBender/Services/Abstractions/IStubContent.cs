@@ -24,6 +24,8 @@ public interface IStubContent
 
     string GuardrailsYaml { get; }
     string LabelsPolicyYaml { get; }
+    string ImagesPolicyYaml { get; }
+
     string ComposeV3Yaml { get; }
     string RequiredKeysYaml { get; }
     string GitHubActionsYaml { get; }

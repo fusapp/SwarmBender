@@ -1,5 +1,4 @@
 using Microsoft.Extensions.DependencyInjection;
-using Spectre.Console;
 using Spectre.Console.Cli;
 using SwarmBender.Cli.Infrastructure;
 using SwarmBender.Cli.Commands;
@@ -15,7 +14,7 @@ services.AddSingleton<IEnvParser, EnvParser>();
 services.AddSingleton<IStubContent, StubContent>();
 services.AddSingleton<IValidator, Validator>();
 services.AddSingleton<IYamlLoader, YamlLoader>();
-
+services.AddSingleton<IRenderExecutor, RenderExecutor>(); // NEW
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp(registrar);
@@ -27,6 +26,8 @@ app.Configure(cfg =>
        .WithDescription("Initialize project root or a specific stack scaffold.");
     cfg.AddCommand<ValidateCommand>("validate")
        .WithDescription("Validate a stack (or all stacks) against policies and basic schema.");
+    cfg.AddCommand<RenderCommand>("render")
+       .WithDescription("Render final stack.yml for one or more environments.");
 });
 
 return app.Run(args);

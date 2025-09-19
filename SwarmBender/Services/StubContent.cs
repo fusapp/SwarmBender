@@ -169,4 +169,14 @@ steps:
     version: '9.x'
 - script: dotnet build ./SwarmBender.Cli -c Release
 """;
+    
+    public string UseEnvVarsDefaultJson => """
+                                           [
+                                             "ENVIRONMENT_SUFFIX",
+                                             "COMPANY_NAME",
+                                             "CONSUL_SERVER",
+                                             "CONSUL_MASTER_TOKEN"
+                                           ]
+                                           """;
+    
 }

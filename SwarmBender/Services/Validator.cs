@@ -1,3 +1,8 @@
+// File: SwarmBender/Services/Validator.cs
+using System;
+using System.IO;
+using System.Linq;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using SwarmBender.Services.Abstractions;
@@ -5,7 +10,9 @@ using SwarmBender.Services.Models;
 
 namespace SwarmBender.Services;
 
-/// <summary>Validates stacks against policies and basic schema (v2).</summary>
+/// <summary>
+/// Validates stacks against policies and basic schema (v2 + appsettings checks).
+/// </summary>
 public sealed class Validator : IValidator
 {
     private readonly IYamlLoader _yaml;
@@ -51,7 +58,7 @@ public sealed class Validator : IValidator
         {
             var outPath = Path.GetFullPath(Path.Combine(root, request.OutFile!));
             Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
-            var json = System.Text.Json.JsonSerializer.Serialize(new ValidateResult(results), new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(new ValidateResult(results), new JsonSerializerOptions { WriteIndented = true });
             await File.WriteAllTextAsync(outPath, json, ct);
         }
 
@@ -82,7 +89,7 @@ public sealed class Validator : IValidator
         var errors = new List<ValidationIssue>();
         var warnings = new List<ValidationIssue>();
 
-        // Policies
+        // --- Policies ---
         var composePolicy = await _yaml.LoadYamlAsync(Path.Combine(root, "ops", "checks", "compose-v3.yml"), ct);
         var allows = GetStringList(composePolicy, "allow") ?? new List<string> { "version", "services" };
         var forbids = GetStringList(composePolicy, "forbid") ?? new List<string> { "build", "depends_on" };
@@ -107,7 +114,7 @@ public sealed class Validator : IValidator
         var requireResources = GetBool(guardRequire, "resources_limits", false);
         var suggestResources = GetBool(guardSuggest, "resources_limits", false);
 
-        // Template
+        // --- Template ---
         var templatePath = Path.Combine(root, "stacks", stackId, "docker-stack.template.yml");
         if (!File.Exists(templatePath))
         {
@@ -140,7 +147,11 @@ public sealed class Validator : IValidator
             return new StackValidationResult(stackId, errors, warnings);
         }
 
-        // Load metadata & checks that depend on service names
+        // --- appsettings*.json structural validation (global) ---
+        foreach (var env in envs)
+            await ValidateAppsettingsJsonDirAsync(Path.Combine(root, "stacks", "all", env, "env"), errors, ct);
+
+        // --- Metadata ---
         var aliasesPath = Path.Combine(root, "stacks", stackId, "aliases.yml");
         var aliases = await _yaml.LoadYamlAsync(aliasesPath, ct) ?? new Dictionary<string, object?>();
         var aliasMap = ToStringToStringMap(aliases);
@@ -154,7 +165,7 @@ public sealed class Validator : IValidator
         var reqServiceKeys = reqKeysYaml.TryGetValue("services", out var svcReq) && svcReq is IDictionary<string, object?> svcReqMap ? ToStringToStringListMap(svcReqMap) : new Dictionary<string, List<string>>();
         var reqGroupKeys = reqKeysYaml.TryGetValue("groups", out var grpReq) && grpReq is IDictionary<string, object?> grpReqMap ? ToStringToStringListMap(grpReqMap) : new Dictionary<string, List<string>>();
 
-        // Validate aliases
+        // Validate aliases & service presence
         foreach (var kv in aliasMap)
         {
             var templateSvc = kv.Key;
@@ -167,13 +178,24 @@ public sealed class Validator : IValidator
                 warnings.Add(new ValidationIssue(ValidationSeverity.Warning, "ALIAS_CANONICAL_DIR_MISSING", $"Canonical service directory not found: services/{canonical}", aliasesPath, canonical));
         }
 
-        // Per-service validations
+        // --- Per-service validations ---
+        var canonicalChecked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var svcKvp in services)
         {
             var svcName = svcKvp.Key;
             var svcMap = svcKvp.Value as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+            var canonical = aliasMap.TryGetValue(svcName, out var c) ? c : svcName;
 
-            // Forbids at service level
+            // appsettings*.json structural validation (service-specific, once per canonical)
+            if (!canonicalChecked.Contains(canonical))
+            {
+                foreach (var env in envs)
+                    await ValidateAppsettingsJsonDirAsync(Path.Combine(root, "services", canonical, "env", env), errors, ct);
+                canonicalChecked.Add(canonical);
+            }
+
+            // Forbidden keys at service level
             foreach (var fb in forbids)
             {
                 if (svcMap.ContainsKey(fb))
@@ -189,7 +211,7 @@ public sealed class Validator : IValidator
                     var hasDigest = image.Contains("@sha256:", StringComparison.OrdinalIgnoreCase);
                     var hasColon = image.Contains(':');
                     var hasTag = hasColon && !image.EndsWith(':');
-                    var tag = hasTag ? image.Substring(image.LastIndexOf(':') + 1) : "";
+                    var tag = hasTag ? image[(image.LastIndexOf(':') + 1)..] : "";
 
                     if (forbidLatest && hasTag && string.Equals(tag, "latest", StringComparison.OrdinalIgnoreCase))
                         errors.Add(new ValidationIssue(ValidationSeverity.Error, "IMAGE_LATEST_FORBIDDEN", $"Service '{svcName}' uses ':latest' tag.", templatePath, $"services.{svcName}.image"));
@@ -199,20 +221,17 @@ public sealed class Validator : IValidator
                 }
             }
 
-            // Labels policy (service-level labels and deploy.labels)
+            // Labels policy
             var labelKeys = CollectLabelKeys(svcMap);
             foreach (var reqLabel in requiredLabels)
-            {
                 if (!labelKeys.Contains(reqLabel))
                     errors.Add(new ValidationIssue(ValidationSeverity.Error, "LABEL_REQUIRED_MISSING", $"Service '{svcName}' missing required label '{reqLabel}'.", templatePath, $"services.{svcName}.labels"));
-            }
+
             foreach (var resLabel in reservedLabels)
-            {
                 if (labelKeys.Contains(resLabel))
                     errors.Add(new ValidationIssue(ValidationSeverity.Error, "LABEL_RESERVED_USED", $"Service '{svcName}' uses reserved label '{resLabel}'.", templatePath, $"services.{svcName}.labels"));
-            }
 
-            // Guardrails: healthcheck/logging suggestions or requirements
+            // Guardrails
             if (requireHealth && !svcMap.ContainsKey("healthcheck"))
                 errors.Add(new ValidationIssue(ValidationSeverity.Error, "HEALTHCHECK_REQUIRED", $"Service '{svcName}' missing 'healthcheck'.", templatePath, $"services.{svcName}.healthcheck"));
             else if (!requireHealth && !svcMap.ContainsKey("healthcheck"))
@@ -222,7 +241,6 @@ public sealed class Validator : IValidator
             if (requireLogging && !hasLogging)
                 errors.Add(new ValidationIssue(ValidationSeverity.Error, "LOGGING_REQUIRED", $"Service '{svcName}' missing logging settings.", templatePath, $"services.{svcName}.logging"));
 
-            // Resources limits
             var deployMap = TryGetMap(svcMap, "deploy");
             var resourcesMap = deployMap is null ? null : TryGetMap(deployMap, "resources");
             var limitsMap = resourcesMap is null ? null : TryGetMap(resourcesMap, "limits");
@@ -235,13 +253,13 @@ public sealed class Validator : IValidator
                 warnings.Add(new ValidationIssue(ValidationSeverity.Warning, "RESOURCES_LIMITS_SUGGESTED", $"Service '{svcName}' should define deploy.resources.limits (cpu/memory).", templatePath, $"services.{svcName}.deploy.resources.limits"));
         }
 
-        // Secrets/configs shape
+        // --- Top-level secrets/configs definition shape ---
         await ValidateSecretsConfigsShapeAsync(root, stackId, "secrets.yml", "secrets", errors, warnings, ct);
         await ValidateSecretsConfigsShapeAsync(root, stackId, "configs.yml", "configs", errors, warnings, ct);
 
-        // Required env keys (service/group based) across envs
-        var servicesNode = (IDictionary<string, object?>) ((IDictionary<string, object?>) (await _yaml.LoadYamlAsync(Path.Combine(root, "stacks", stackId, "docker-stack.template.yml"), ct)))["services"];
-        foreach (var svcName in servicesNode.Keys)
+        // --- Required configuration keys across envs (template env + baselines + appsettings) ---
+        var templateServices = (IDictionary<string, object?>)template["services"];
+        foreach (var svcName in templateServices.Keys)
         {
             var canonical = aliasMap.TryGetValue(svcName, out var c) ? c : svcName;
             var requiredForSvc = reqServiceKeys.TryGetValue(canonical, out var list) ? list : new List<string>();
@@ -254,17 +272,19 @@ public sealed class Validator : IValidator
 
             foreach (var env in envs)
             {
-                var foundKeys = await CollectEnvKeysAsync(root, canonical, env, templatePath, servicesNode, svcName, ct);
+                var foundKeys = await CollectConfigKeysAsync(root, canonical, env, templatePath, templateServices, svcName, ct);
                 foreach (var rk in required)
                 {
                     if (!foundKeys.Contains(rk))
-                        errors.Add(new ValidationIssue(ValidationSeverity.Error, "ENV_REQUIRED_MISSING", $"[{env}] Service '{canonical}' missing required env key '{rk}' in template/baselines.", null, $"env:{env}:{canonical}:{rk}"));
+                        errors.Add(new ValidationIssue(ValidationSeverity.Error, "ENV_REQUIRED_MISSING", $"[{env}] Service '{canonical}' missing required config key '{rk}' in template/baselines/appsettings.", null, $"env:{env}:{canonical}:{rk}"));
                 }
             }
         }
 
         return new StackValidationResult(stackId, errors, warnings);
     }
+
+    // ---- helpers ----
 
     private static HashSet<string> CollectLabelKeys(IDictionary<string, object?> svcMap)
     {
@@ -332,38 +352,24 @@ public sealed class Validator : IValidator
         return d;
     }
 
-    private async Task ValidateSecretsConfigsShapeAsync(string root, string stackId, string fileName, string topKey, List<ValidationIssue> errors, List<ValidationIssue> warnings, CancellationToken ct)
+    private async Task ValidateAppsettingsJsonDirAsync(string dir, List<ValidationIssue> errors, CancellationToken ct)
     {
-        var path = Path.Combine(root, "stacks", stackId, fileName);
-        if (!File.Exists(path)) return;
-
-        var yaml = await _yaml.LoadYamlAsync(path, ct);
-        if (yaml.Count == 0)
+        if (!Directory.Exists(dir)) return;
+        foreach (var file in Directory.GetFiles(dir, "appsettings*.json"))
         {
-            errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_FILE_EMPTY", $"{fileName} is empty or invalid YAML.", path));
-            return;
-        }
-
-        if (!yaml.TryGetValue(topKey, out var top) || top is not IDictionary<string, object?> map || map.Count == 0)
-        {
-            errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_TOPKEY_MISSING", $"'{topKey}:' section missing or empty in {fileName}.", path, topKey));
-            return;
-        }
-
-        foreach (var item in map)
-        {
-            var def = item.Value as IDictionary<string, object?> ?? new Dictionary<string, object?>();
-            var hasExternal = def.TryGetValue("external", out var ev) && ev is bool eb && eb;
-            var hasFile = def.ContainsKey("file");
-
-            if (hasExternal && hasFile)
-                errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_BOTH_FILE_AND_EXTERNAL", $"Item '{item.Key}' in {fileName} has both 'external' and 'file'.", path, $"{topKey}.{item.Key}"));
-            else if (!hasExternal && !hasFile)
-                errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_NO_FILE_OR_EXTERNAL", $"Item '{item.Key}' in {fileName} needs 'external: true' or 'file: path'.", path, $"{topKey}.{item.Key}"));
+            try
+            {
+                using var s = File.OpenRead(file);
+                await JsonDocument.ParseAsync(s, cancellationToken: ct);
+            }
+            catch
+            {
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, "APPSETTINGS_INVALID_JSON", $"Invalid JSON: {Path.GetFileName(file)}", file, null));
+            }
         }
     }
 
-    private static async Task<HashSet<string>> CollectEnvKeysAsync(string root, string canonicalService, string env, string templatePath, IDictionary<string, object?> services, string templateSvcName, CancellationToken ct)
+    private async Task<HashSet<string>> CollectConfigKeysAsync(string root, string canonicalService, string env, string templatePath, IDictionary<string, object?> services, string templateSvcName, CancellationToken ct)
     {
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -389,7 +395,7 @@ public sealed class Validator : IValidator
             }
         }
 
-        // 2) Global baseline: stacks/all/<env>/env/*.json
+        // 2) Global baseline: stacks/all/<env>/env/*.json (flatten, includes appsettings)
         var baseEnvDir = Path.Combine(root, "stacks", "all", env, "env");
         if (Directory.Exists(baseEnvDir))
         {
@@ -397,7 +403,7 @@ public sealed class Validator : IValidator
                 foreach (var k in await ReadJsonKeysAsync(file, ct)) keys.Add(k);
         }
 
-        // 3) Service-specific baseline: services/<canonicalService>/env/<env>/*.json
+        // 3) Service-specific: services/<canonicalService>/env/<env>/*.json (flatten, includes appsettings)
         var svcEnvDir = Path.Combine(root, "services", canonicalService, "env", env);
         if (Directory.Exists(svcEnvDir))
         {
@@ -446,10 +452,52 @@ public sealed class Validator : IValidator
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
         var path = Path.Combine(reports, $"{res.StackId}-{stamp}.json");
 
-        var json = System.Text.Json.JsonSerializer.Serialize(res, new System.Text.Json.JsonSerializerOptions
+        var json = JsonSerializer.Serialize(res, new JsonSerializerOptions
         {
             WriteIndented = true
         });
         await File.WriteAllTextAsync(path, json, ct);
+    }
+
+    /// <summary>
+    /// Ensures secrets/configs definition files have a valid shape.
+    /// Either 'external: true' or 'file: path' must be present (but not both).
+    /// </summary>
+    private async Task ValidateSecretsConfigsShapeAsync(
+        string root,
+        string stackId,
+        string fileName,
+        string topKey,
+        List<ValidationIssue> errors,
+        List<ValidationIssue> warnings,
+        CancellationToken ct)
+    {
+        var path = Path.Combine(root, "stacks", stackId, fileName);
+        if (!File.Exists(path)) return;
+
+        var yaml = await _yaml.LoadYamlAsync(path, ct);
+        if (yaml.Count == 0)
+        {
+            errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_FILE_EMPTY", $"{fileName} is empty or invalid YAML.", path));
+            return;
+        }
+
+        if (!yaml.TryGetValue(topKey, out var top) || top is not IDictionary<string, object?> map || map.Count == 0)
+        {
+            errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_TOPKEY_MISSING", $"'{topKey}:' section missing or empty in {fileName}.", path, topKey));
+            return;
+        }
+
+        foreach (var item in map)
+        {
+            var def = item.Value as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+            var hasExternal = def.TryGetValue("external", out var ev) && ev is bool eb && eb;
+            var hasFile = def.ContainsKey("file");
+
+            if (hasExternal && hasFile)
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_BOTH_FILE_AND_EXTERNAL", $"Item '{item.Key}' in {fileName} has both 'external' and 'file'.", path, $"{topKey}.{item.Key}"));
+            else if (!hasExternal && !hasFile)
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, $"{topKey.ToUpper()}_NO_FILE_OR_EXTERNAL", $"Item '{item.Key}' in {fileName} needs 'external: true' or 'file: path'.", path, $"{topKey}.{item.Key}"));
+        }
     }
 }

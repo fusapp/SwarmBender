@@ -30,4 +30,6 @@ public interface IStubContent
     string RequiredKeysYaml { get; }
     string GitHubActionsYaml { get; }
     string AzurePipelinesYaml { get; }
+    
+    string UseEnvVarsDefaultJson { get; }
 }

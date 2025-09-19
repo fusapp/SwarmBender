@@ -9,4 +9,7 @@ public sealed record RenderRequest(
     bool WriteHistory,     // default: true
     bool Preview,          // print to stdout
     bool DryRun,
-    bool Quiet);
+    bool Quiet,
+    string AppSettingsMode = "env",   // "env" or "config"
+    string AppSettingsTarget = "/app/appsettings.json" // used when AppSettingsMode == "config"
+);

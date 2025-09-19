@@ -7,7 +7,7 @@ namespace SwarmBender.Services;
 /// - Dictionaries are merged recursively
 /// - Lists are replaced by the latter (simple rule to avoid accidental concatenation)
 /// - Scalars are overwritten by the latter
-/// Also provides helpers to normalize labels and environment structures.
+/// Also provides helpers to normalize labels and environment structures, and JSON merge/flatten.
 /// </summary>
 public static class MergeHelpers
 {
@@ -93,23 +93,51 @@ public static class MergeHelpers
     public static object EnvironmentToYaml(IDictionary<string, string> env)
         => env.ToDictionary(k => k.Key, v => (object?)v.Value, StringComparer.OrdinalIgnoreCase);
 
-    public static IEnumerable<string> ReadJsonKeys(JsonElement el, string prefix = "")
+    // ---- JSON helpers for appsettings ----
+
+    public static JsonElement DeepMergeJson(JsonElement baseEl, JsonElement overlay)
+    {
+        if (baseEl.ValueKind != JsonValueKind.Object || overlay.ValueKind != JsonValueKind.Object)
+            return overlay.ValueKind == JsonValueKind.Undefined ? baseEl : overlay;
+
+        using var doc = JsonDocument.Parse("{}");
+        var dict = new Dictionary<string, JsonElement>();
+
+        foreach (var p in baseEl.EnumerateObject())
+            dict[p.Name] = p.Value;
+
+        foreach (var p in overlay.EnumerateObject())
+        {
+            if (dict.TryGetValue(p.Name, out var existing) && existing.ValueKind == JsonValueKind.Object && p.Value.ValueKind == JsonValueKind.Object)
+                dict[p.Name] = DeepMergeJson(existing, p.Value);
+            else
+                dict[p.Name] = p.Value;
+        }
+
+        using var outDoc = JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(dict.ToDictionary(k => k.Key, v => v.Value)));
+        return outDoc.RootElement.Clone();
+    }
+
+    public static void FlattenJson(JsonElement el, IDictionary<string, string> dest, string prefix = "")
     {
         if (el.ValueKind == JsonValueKind.Object)
         {
             foreach (var prop in el.EnumerateObject())
             {
-                var name = string.IsNullOrEmpty(prefix) ? prop.Name : prefix + "__" + prop.Name;
-                if (prop.Value.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var k in ReadJsonKeys(prop.Value, name))
-                        yield return k;
-                }
-                else
-                {
-                    yield return name;
-                }
+                var key = string.IsNullOrEmpty(prefix) ? prop.Name : prefix + "__" + prop.Name;
+                FlattenJson(prop.Value, dest, key);
             }
+            return;
         }
+
+        // Scalars & arrays -> write raw text
+        dest[prefix] = el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString() ?? "",
+            JsonValueKind.Number => el.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => el.GetRawText()
+        };
     }
 }

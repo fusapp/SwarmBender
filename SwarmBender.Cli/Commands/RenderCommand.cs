@@ -48,6 +48,14 @@ public sealed class RenderCommand : AsyncCommand<RenderCommand.Settings>
         [CommandOption("--quiet")]
         [Description("Suppress non-essential output.")]
         public bool Quiet { get; init; }
+
+        [CommandOption("--appsettings-mode <env|config>")]
+        [Description("How to consume appsettings*.json: 'env' (flatten to env vars) or 'config' (generate swarm config & mount). Default: env.")]
+        public string AppSettingsMode { get; init; } = "env";
+
+        [CommandOption("--appsettings-target <PATH>")]
+        [Description("When --appsettings-mode=config, mount target path inside the container (default: /app/appsettings.json).")]
+        public string AppSettingsTarget { get; init; } = "/app/appsettings.json";
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
@@ -63,6 +71,13 @@ public sealed class RenderCommand : AsyncCommand<RenderCommand.Settings>
             return 2;
         }
 
+        var mode = (s.AppSettingsMode ?? "env").ToLowerInvariant();
+        if (mode != "env" && mode != "config")
+        {
+            AnsiConsole.MarkupLine("[red]Invalid --appsettings-mode.[/] Use 'env' or 'config'.");
+            return 2;
+        }
+
         try
         {
             var req = new RenderRequest(
@@ -73,7 +88,9 @@ public sealed class RenderCommand : AsyncCommand<RenderCommand.Settings>
                 WriteHistory: !s.NoHistory,
                 Preview: s.Preview,
                 DryRun: s.DryRun,
-                Quiet: s.Quiet);
+                Quiet: s.Quiet,
+                AppSettingsMode: mode,
+                AppSettingsTarget: s.AppSettingsTarget);
 
             var result = await _executor.RenderAsync(req);
 

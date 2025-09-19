@@ -28,6 +28,7 @@ public sealed class RenderExecutor : IRenderExecutor
 {
     private static readonly ISerializer YamlWriter = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
+        .WithTypeConverter(new FlowSeqYamlConverter()) // <-- added
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -86,6 +87,7 @@ public sealed class RenderExecutor : IRenderExecutor
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "secrets.yml"), "secrets", ct);
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "configs.yml"), "configs", ct);
 
+            ApplyYamlStyleHints(rendered);
             var yaml = YamlWriter.Serialize(rendered);
 
             var outDir = Path.IsPathRooted(request.OutDir) ? request.OutDir : Path.Combine(root, request.OutDir);
@@ -548,5 +550,27 @@ public sealed class RenderExecutor : IRenderExecutor
             result[newKey] = newVal;
         }
         return result;
+    }
+    
+    private static void ApplyYamlStyleHints(IDictionary<string, object?> root)
+    {
+        if (!root.TryGetValue("services", out var svcsNode) || svcsNode is not IDictionary<string, object?> services)
+            return;
+
+        foreach (var svc in services.Values.OfType<IDictionary<string, object?>>())
+        {
+            if (!svc.TryGetValue("healthcheck", out var hcNode) || hcNode is not IDictionary<string, object?> hc)
+                continue;
+
+            if (hc.TryGetValue("test", out var testNode))
+            {
+                // Only convert lists to FlowSeq; leave strings as-is (e.g. "CMD-SHELL ...")
+                if (testNode is IEnumerable<object?> seq && testNode is not FlowSeq)
+                {
+                    // preserve current order
+                    hc["test"] = new FlowSeq(seq);
+                }
+            }
+        }
     }
 }

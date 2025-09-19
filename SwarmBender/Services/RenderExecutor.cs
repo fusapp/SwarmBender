@@ -1,37 +1,46 @@
 // File: SwarmBender/Services/RenderExecutor.cs
-using Spectre.Console;
-using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Linq;
-using System.Collections;
+using System.Threading;
+using Spectre.Console;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 using SwarmBender.Services.Abstractions;
 using SwarmBender.Services.Models;
 
 namespace SwarmBender.Services;
 
 /// <summary>
-/// Renderer v1.9
-/// - Root overlays (env scoped):
-///     stacks/all/<env>/*.yml|yaml      (lowest)
-///     stacks/<stackId>/<env>/*.yml|yaml
-/// - Stack overlays with wildcard:
-///     stacks/all/<env>/stack/*.yml|yaml
-///     stacks/<stackId>/<env>/stack/*.yml|yaml   (highest; last wins)
+/// Renderer v2.0
+/// - Generic YAML overlays (no filename prefixes, last-write wins with conflict guard):
+///     stacks/all/&lt;env&gt;/*.yml|yaml   (lower)
+///     stacks/&lt;stackId&gt;/&lt;env&gt;/*.yml|yaml
+///     services/&lt;svc&gt;/&lt;env&gt;/*.yml|yaml (service-scoped)
 /// - Keeps special formatting:
-///     * healthcheck.test -> flow sequence
+///     * healthcheck.test -> flow sequence (["CMD","curl","-f",...])
 ///     * environment -> list of "KEY=VALUE"
 ///     * labels -> list of "key=value"
 /// - Token interpolation (${VAR}, ${ENVVARS})
-/// - Process env allowlist via use-envvars.json (file > process precedence)
+/// - Process env allow-list via use-envvars.json (file > process precedence)
+/// - Appsettings mode:
+///     * env: flattens appsettings.json -> env vars
+///     * config: writes merged appsettings to file + attaches as Swarm config
+/// - NEW: secrets-map integration:
+///     * reads ops/vars/secrets-map.&lt;env&gt;.yml
+///     * service.x-sb-secrets -> service.secrets[] + bubble top-level secrets (external: true)
 /// </summary>
 public sealed class RenderExecutor : IRenderExecutor
 {
     private static readonly ISerializer YamlWriter = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
-        .WithTypeConverter(new FlowSeqYamlConverter()) // keep healthcheck.test as flow array
+        .WithTypeConverter(new FlowSeqYamlConverter()) // keep healthcheck.test flow style
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -52,30 +61,45 @@ public sealed class RenderExecutor : IRenderExecutor
         if (!File.Exists(templatePath))
             throw new FileNotFoundException($"Template not found: {templatePath}");
 
-        // Load template into a mutable map
         var template = await _yaml.LoadYamlAsync(templatePath, ct);
+
         var envs = request.Environments.Select(e => e.ToLowerInvariant()).ToList();
         var outputs = new List<RenderOutput>();
 
         foreach (var env in envs)
         {
-            // Start from template for each env
-            IDictionary<string, object?> rendered =
-                new Dictionary<string, object?>(template, StringComparer.OrdinalIgnoreCase);
+            // start fresh from template per env
+            var rendered = new Dictionary<string, object?>(template, StringComparer.OrdinalIgnoreCase);
 
-
-            // 1) ROOT-LEVEL overlays (no wildcard semantics; conflict-checked deep-merge)
+            // overlays (global -> stack)
             await MergeRootOverlayDirAsync(rendered, Path.Combine(root, "stacks", "all", env), ct);
             await MergeRootOverlayDirAsync(rendered, Path.Combine(stackRoot, env), ct);
-
-            // 2) STACK overlays with wildcard support (services: "*" + per-service)
-            rendered = await ApplyOverlaysAsync(root, request.StackId!, env, rendered, request.Quiet, ct);
+            // ADD THESE:
+            await MergeRootOverlayDirAsync(rendered, Path.Combine(root, "stacks", "all", env, "stack"), ct);
+            await MergeRootOverlayDirAsync(rendered, Path.Combine(stackRoot, env, "stack"), ct);
 
             if (!rendered.TryGetValue("services", out var servicesNode) ||
-                servicesNode is not IDictionary<string, object?> baseServices ||
-                baseServices.Count == 0)
-            {
+                servicesNode is not IDictionary<string, object?> baseServices)
                 throw new InvalidOperationException("Template/overlays missing 'services' section.");
+            // Apply wildcard overlay under services ("*") to all services, then remove it.
+            if (baseServices.TryGetValue("*", out var wildNode) && wildNode is IDictionary<string, object?> wildMap)
+            {
+                foreach (var svcName in baseServices.Keys.Where(n => !string.Equals(n, "*", StringComparison.Ordinal))
+                             .ToList())
+                {
+                    if (baseServices[svcName] is IDictionary<string, object?> svcMap)
+                    {
+                        DeepMergeRoot(svcMap, wildMap);
+                    }
+                    else
+                    {
+                        var newMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                        DeepMergeRoot(newMap, wildMap);
+                        baseServices[svcName] = newMap;
+                    }
+                }
+
+                baseServices.Remove("*");
             }
 
             // aliases (optional)
@@ -88,11 +112,13 @@ public sealed class RenderExecutor : IRenderExecutor
                     aliasMap[kv.Key] = kv.Value?.ToString() ?? kv.Key;
             }
 
-            var finalServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
-            // Iterate services after all overlays (includes any added services)
-            var serviceKeys = baseServices.Keys.ToList();
-            foreach (var svcKey in serviceKeys)
+            // secrets-map for this env (may be empty, warn if missing when not quiet)
+            var secretsMap = await LoadSecretsMapAsync(root, env, warnIfMissing: !request.Quiet, ct);
+
+            // compose services
+            var finalServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var svcKey in baseServices.Keys.ToList())
             {
                 var tmplSvcName = svcKey;
                 var svcMap = baseServices[svcKey] as IDictionary<string, object?> ?? new Dictionary<string, object?>();
@@ -101,21 +127,21 @@ public sealed class RenderExecutor : IRenderExecutor
                     ? c
                     : tmplSvcName;
 
-                var composedService = await ComposeServiceAsync(root, request, canonical, env, svcMap, ct);
+                var composedService = await ComposeServiceAsync(root, request, canonical, env, svcMap, secretsMap, ct);
                 finalServices[tmplSvcName] = composedService;
             }
 
             rendered["services"] = finalServices;
 
-            // Bubble up appsettings-generated configs, then merge static top-level defs
+            // bubble-up from services, then merge static top-level defs
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "secrets.yml"), "secrets", ct);
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "configs.yml"), "configs", ct);
 
-            // Style hints (healthcheck.test -> flow sequence)
+            // style hints (healthcheck.test -> flow)
             ApplyYamlStyleHints(rendered);
 
+            // write
             var yaml = YamlWriter.Serialize(rendered);
-
             var outDir = Path.IsPathRooted(request.OutDir) ? request.OutDir : Path.Combine(root, request.OutDir);
             var outFile = Path.Combine(outDir, $"{request.StackId}-{env}.stack.yml");
 
@@ -152,19 +178,20 @@ public sealed class RenderExecutor : IRenderExecutor
         string canonicalService,
         string env,
         IDictionary<string, object?> svc,
+        IReadOnlyDictionary<string, string> secretsMap,
         CancellationToken ct)
     {
-        // 3) SERVICE-LEVEL overlays (highest precedence, per service)
-        await MergeServiceOverlayDirAsync(Path.Combine(root, "services", canonicalService, env), canonicalService, svc, ct);
+        // service-level overlays (highest precedence)
+        await MergeServiceOverlayDirAsync(Path.Combine(root, "services", canonicalService, env), canonicalService, svc,
+            ct);
 
-        // Capture environment & labels order AFTER overlays
+        // capture environment & labels order AFTER overlays
         var templateEnvOrder =
             ExtractEnvKeyOrderFromNode(svc.TryGetValue("environment", out var rawEnvNode) ? rawEnvNode : null);
 
         var templateLabelsOrder = new List<string>();
         var rawLabelsNode0 = svc.TryGetValue("labels", out var rawLabelsNodeA) ? rawLabelsNodeA : null;
         templateLabelsOrder.AddRange(ExtractLabelOrderFromNode(rawLabelsNode0));
-
         if (svc.TryGetValue("deploy", out var deployNode0) && deployNode0 is IDictionary<string, object?> dep0 &&
             dep0.TryGetValue("labels", out var depLabelsNode0))
         {
@@ -176,9 +203,9 @@ public sealed class RenderExecutor : IRenderExecutor
         // Track keys from files (JSON/appsettings) -> file wins over process env
         var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // --- ENVIRONMENT (build known keys from current 'environment' + files) ---
-        var envVars = MergeHelpers.NormalizeEnvironment(
-            svc.TryGetValue("environment", out var initialEnvNode) ? initialEnvNode : null);
+        // ENVIRONMENT
+        var envVars =
+            MergeHelpers.NormalizeEnvironment(svc.TryGetValue("environment", out var envNode) ? envNode : null);
 
         // Merge from global/service JSON (skip appsettings when mode=config)
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
@@ -194,10 +221,9 @@ public sealed class RenderExecutor : IRenderExecutor
         // appsettings: may add/override env vars (env mode) OR produce config (config mode)
         await ApplyAppSettingsAsync(root, request, canonicalService, env, envVars, svc, fileKeys, ct);
 
-        // --- Process env overlay with allowlist ---
+        // Process env overlay with allowlist
         var allow = await LoadAllowListAsync(root, request.StackId!, canonicalService, env, ct);
         var processEnv = GetProcessEnvironment();
-
         foreach (var kv in processEnv)
         {
             var key = kv.Key;
@@ -207,19 +233,14 @@ public sealed class RenderExecutor : IRenderExecutor
                 continue; // file wins
 
             if (envVars.ContainsKey(key))
-            {
-                envVars[key] = val; // override template/overlay value
-            }
+                envVars[key] = val;
             else if (allow.Contains(key))
-            {
-                envVars[key] = val; // allow add
-            }
+                envVars[key] = val;
         }
 
-        // --- LABELS (normalize deploy.labels -> service.labels) ---
+        // LABELS normalize (deploy.labels -> service.labels)
         var labelDict =
             MergeHelpers.NormalizeLabels(svc.TryGetValue("labels", out var labelsNode2) ? labelsNode2 : null);
-
         if (svc.TryGetValue("deploy", out var deployNode) && deployNode is IDictionary<string, object?> deployMap &&
             deployMap.TryGetValue("labels", out var depLabelsNode))
         {
@@ -228,13 +249,16 @@ public sealed class RenderExecutor : IRenderExecutor
             deployMap.Remove("labels");
         }
 
-        // Write labels as sequence of "key=value" (template order first)
+        // write labels as sequence of "key=value" (template order first)
         if (labelDict.Count > 0)
             svc["labels"] = BuildLabelsSequence(labelDict, templateLabelsOrder);
         else
             svc.Remove("labels");
 
-        // ---- Token interpolation vars ----
+        // SECRETS from secrets-map via x-sb-secrets
+        AttachSecretsFromMap(svc, secretsMap);
+
+        // Token vars for interpolation
         var tokenVars = new Dictionary<string, string>(envVars, StringComparer.OrdinalIgnoreCase);
         foreach (var kv in processEnv)
             if (!tokenVars.ContainsKey(kv.Key))
@@ -243,21 +267,16 @@ public sealed class RenderExecutor : IRenderExecutor
         // Special ${ENVVARS}
         tokenVars["ENVVARS"] = BuildEnvVarsInline(tokenVars: envVars);
 
-        // Put env as sequence of "KEY=VALUE" (preserve order from template/overlays first)
+        // Put env as sequence of "KEY=VALUE" (preserve order)
         svc["environment"] = BuildEnvironmentSequence(envVars, templateEnvOrder);
 
-        // Expand tokens across the service map (including environment & labels list items)
+        // Expand tokens across the service map
         var svcExpanded = ExpandMapTokens(svc, tokenVars);
         return svcExpanded;
     }
 
     // ---------- Overlays helpers ----------
 
-    /// <summary>
-    /// Deep-merge without filename-based precedence. If the same scalar path is set
-    /// to different values across multiple files in the SAME directory, record a conflict.
-    /// Maps are merged recursively; list vs scalar or map vs scalar also counts as conflict.
-    /// </summary>
     private static void MergeMapNoConflict(
         IDictionary<string, object?> target,
         IDictionary<string, object?> src,
@@ -325,7 +344,8 @@ public sealed class RenderExecutor : IRenderExecutor
             var listB = eb.ToList();
             if (listA.Count != listB.Count) return false;
             for (int i = 0; i < listA.Count; i++)
-                if (!ObjectsEqual(listA[i], listB[i])) return false;
+                if (!ObjectsEqual(listA[i], listB[i]))
+                    return false;
             return true;
         }
 
@@ -337,12 +357,12 @@ public sealed class RenderExecutor : IRenderExecutor
         if (!Directory.Exists(dir)) return;
 
         var conflicts = new List<string>();
+
         foreach (var file in Directory.GetFiles(dir).Where(f =>
                      f.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
                      f.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)))
         {
             var map = await _yaml.LoadYamlAsync(file, ct);
-            if (map is null || map.Count == 0) continue;
             MergeMapNoConflict(target, map, prefix: "", conflicts);
         }
 
@@ -366,16 +386,13 @@ public sealed class RenderExecutor : IRenderExecutor
                      f.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)))
         {
             var map = await _yaml.LoadYamlAsync(file, ct);
-            if (map is null || map.Count == 0) continue;
 
-            // Case 1: services:<svc>: subtree
             if (map.TryGetValue("services", out var sNode) && sNode is IDictionary<string, object?> services &&
                 services.TryGetValue(canonicalService, out var svcNode) &&
                 svcNode is IDictionary<string, object?> svcMap)
             {
                 MergeMapNoConflict(svc, svcMap, prefix: "", conflicts);
             }
-            // Case 2: direct fragment (deploy:, logging:, labels:, healthcheck:, etc.)
             else
             {
                 MergeMapNoConflict(svc, map, prefix: "", conflicts);
@@ -387,127 +404,6 @@ public sealed class RenderExecutor : IRenderExecutor
             var msg = $"Overlay conflict(s) detected under '{dir}' for service '{canonicalService}':\n - " +
                       string.Join("\n - ", conflicts.Distinct(StringComparer.OrdinalIgnoreCase));
             throw new InvalidOperationException(msg);
-        }
-    }
-
-    // ---------- Stack overlays with wildcard support ----------
-
-    private async Task<IDictionary<string, object?>> ApplyOverlaysAsync(
-        string root,
-        string stackId,
-        string env,
-        IDictionary<string, object?> baseDoc,
-        bool quiet,
-        CancellationToken ct)
-    {
-        var result = new Dictionary<string, object?>(baseDoc, StringComparer.OrdinalIgnoreCase);
-
-        async Task ApplyDirectoryAsync(string dir)
-        {
-            if (!Directory.Exists(dir)) return;
-
-            var files = Directory.EnumerateFiles(dir, "*.yml")
-                .Concat(Directory.EnumerateFiles(dir, "*.yaml"))
-                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            foreach (var file in files)
-            {
-                var overlay = await _yaml.LoadYamlAsync(file, ct);
-                if (overlay is null || overlay.Count == 0)
-                    continue;
-
-                // Merge non-services root keys directly
-                if (overlay.TryGetValue("services", out _))
-                {
-                    var nonServices = overlay
-                        .Where(kv => !string.Equals(kv.Key, "services", StringComparison.OrdinalIgnoreCase))
-                        .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
-                    DeepMergeRoot(result, nonServices);
-                }
-                else
-                {
-                    DeepMergeRoot(result, overlay);
-                }
-
-                // Merge services with wildcard support
-                if (overlay.TryGetValue("services", out var servicesNode) &&
-                    servicesNode is IDictionary<string, object?> ovServices)
-                {
-                    if (!result.TryGetValue("services", out var baseServicesNode) ||
-                        baseServicesNode is not IDictionary<string, object?> baseServices)
-                    {
-                        baseServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                        result["services"] = baseServices;
-                    }
-
-                    ApplyServicesOverlay(baseServices, ovServices);
-                }
-
-                if (!quiet)
-                    AnsiConsole.MarkupLine($"[grey]overlay applied:[/] {file}");
-            }
-        }
-
-        // global stack overlays first, then stack-specific (last wins)
-        await ApplyDirectoryAsync(Path.Combine(root, "stacks", "all", env, "stack"));
-        await ApplyDirectoryAsync(Path.Combine(root, "stacks", stackId, env, "stack"));
-
-        return result;
-    }
-
-    private static void DeepMergeRoot(
-        IDictionary<string, object?> target,
-        IDictionary<string, object?> source)
-    {
-        foreach (var (k, v) in source)
-        {
-            if (v is IDictionary<string, object?> sMap &&
-                target.TryGetValue(k, out var tVal) &&
-                tVal is IDictionary<string, object?> tMap)
-            {
-                DeepMergeRoot(tMap, sMap);
-            }
-            else
-            {
-                target[k] = v; // lists/scalars: replace
-            }
-        }
-    }
-
-    private static void ApplyServicesOverlay(
-        IDictionary<string, object?> baseServices,
-        IDictionary<string, object?> overlayServices)
-    {
-        // 1) wildcard first
-        if (overlayServices.TryGetValue("*", out var wild) &&
-            wild is IDictionary<string, object?> wildMap)
-        {
-            foreach (var svcName in baseServices.Keys.ToList())
-            {
-                var baseMap = baseServices[svcName] as IDictionary<string, object?>
-                              ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                DeepMergeRoot(baseMap, wildMap);
-                baseServices[svcName] = baseMap;
-            }
-        }
-
-        // 2) explicit services
-        foreach (var kv in overlayServices)
-        {
-            if (kv.Key == "*") continue;
-
-            var ovMap = kv.Value as IDictionary<string, object?>
-                        ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-            if (!baseServices.TryGetValue(kv.Key, out var baseNode) ||
-                baseNode is not IDictionary<string, object?> baseMap)
-            {
-                baseMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                baseServices[kv.Key] = baseMap;
-            }
-
-            DeepMergeRoot(baseMap, ovMap);
         }
     }
 
@@ -538,8 +434,7 @@ public sealed class RenderExecutor : IRenderExecutor
         return order;
     }
 
-    private static IList<object?> BuildEnvironmentSequence(
-        IDictionary<string, string> envVars,
+    private static IList<object?> BuildEnvironmentSequence(IDictionary<string, string> envVars,
         IList<string>? preferredOrder)
     {
         var result = new List<object?>();
@@ -592,9 +487,7 @@ public sealed class RenderExecutor : IRenderExecutor
         }
     }
 
-    private static IList<object?> BuildLabelsSequence(
-        IDictionary<string, string> labels,
-        IList<string>? preferredOrder)
+    private static IList<object?> BuildLabelsSequence(IDictionary<string, string> labels, IList<string>? preferredOrder)
     {
         var result = new List<object?>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -651,33 +544,15 @@ public sealed class RenderExecutor : IRenderExecutor
 
     // ---------- top-level helpers ----------
 
-    private async Task MergeTopLevelAsync(
-        IDictionary<string, object?> rendered,
-        string filePath,
-        string topKey,
+    private async Task MergeTopLevelAsync(IDictionary<string, object?> rendered, string filePath, string topKey,
         CancellationToken ct)
     {
-        // bubble up appsettings-generated configs (from services)
-        if (rendered.TryGetValue("services", out var node) && node is IDictionary<string, object?> services)
-        {
-            foreach (var svc in services.Values.OfType<IDictionary<string, object?>>())
-            {
-                if (svc.TryGetValue("x-sb-top-config", out var x) && x is IDictionary<string, object?> m)
-                {
-                    var dict = rendered.TryGetValue(topKey, out var existing) &&
-                               existing is IDictionary<string, object?> ex
-                        ? ex
-                        : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        // bubble up x-sb-top-config -> configs
+        BubbleUpTopFromServices(rendered, serviceKey: "x-sb-top-config", targetTopKey: "configs");
+        // bubble up x-sb-top-secrets -> secrets
+        BubbleUpTopFromServices(rendered, serviceKey: "x-sb-top-secrets", targetTopKey: "secrets");
 
-                    foreach (var kv in m)
-                        dict[kv.Key] = kv.Value;
-
-                    rendered[topKey] = dict;
-                    svc.Remove("x-sb-top-config");
-                }
-            }
-        }
-
+        // merge static top-level defs from stack file (secrets.yml / configs.yml)
         if (!File.Exists(filePath)) return;
         var map = await _yaml.LoadYamlAsync(filePath, ct);
         if (!map.TryGetValue(topKey, out var n) || n is not IDictionary<string, object?> top) return;
@@ -692,6 +567,32 @@ public sealed class RenderExecutor : IRenderExecutor
         rendered[topKey] = target;
     }
 
+    private static void BubbleUpTopFromServices(IDictionary<string, object?> rendered, string serviceKey,
+        string targetTopKey)
+    {
+        if (!rendered.TryGetValue("services", out var node) || node is not IDictionary<string, object?> services)
+            return;
+
+        var aggregate = rendered.TryGetValue(targetTopKey, out var existing) &&
+                        existing is IDictionary<string, object?> ex
+            ? ex
+            : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var svc in services.Values.OfType<IDictionary<string, object?>>())
+        {
+            if (svc.TryGetValue(serviceKey, out var x) && x is IDictionary<string, object?> m)
+            {
+                foreach (var kv in m)
+                    aggregate[kv.Key] = kv.Value;
+                svc.Remove(serviceKey);
+            }
+        }
+
+        if (aggregate.Count > 0)
+            rendered[targetTopKey] = aggregate;
+    }
+
+    // ---------- JSON/env helpers ----------
     private async Task MergeJsonEnvDirAsync(
         string dir,
         IDictionary<string, string> env,
@@ -700,10 +601,17 @@ public sealed class RenderExecutor : IRenderExecutor
         ISet<string>? fileKeys = null)
     {
         if (!Directory.Exists(dir)) return;
+
         foreach (var file in Directory.GetFiles(dir, "*.json"))
         {
-            var name = Path.GetFileName(file).ToLowerInvariant();
-            var isApp = name.StartsWith("appsettings") && name.EndsWith(".json");
+            var name = Path.GetFileName(file);
+
+            // ❗ allowlist dosyalarını env kaynağı olarak KULLANMAYALIM
+            if (name.Equals("use-envvars.json", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var lname = name.ToLowerInvariant();
+            var isApp = lname.StartsWith("appsettings") && lname.EndsWith(".json");
             if (isApp && skipAppSettings)
                 continue;
 
@@ -712,67 +620,27 @@ public sealed class RenderExecutor : IRenderExecutor
                 using var s = File.OpenRead(file);
                 var doc = await JsonDocument.ParseAsync(s, cancellationToken: ct);
 
+                // Yalnızca 'object' kökleri flatten edelim. (array/root → atla)
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    continue;
+
                 var flat = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 MergeHelpers.FlattenJson(doc.RootElement, flat);
+
                 foreach (var kv in flat)
                 {
+                    // boş anahtarları da filtrele
+                    if (string.IsNullOrWhiteSpace(kv.Key)) continue;
+
                     env[kv.Key] = kv.Value;
-                    fileKeys?.Add(kv.Key); // mark as provided by files
+                    fileKeys?.Add(kv.Key); // file kaynağından geldiğini işaretle
                 }
             }
             catch
             {
-                // ignore invalid json
+                // invalid json'u sessizce yoksay
             }
         }
-    }
-
-    // ---------- token expansion ----------
-
-    private static Dictionary<string, string> GetProcessEnvironment()
-    {
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (DictionaryEntry de in Environment.GetEnvironmentVariables())
-        {
-            var key = de.Key?.ToString();
-            if (string.IsNullOrWhiteSpace(key)) continue;
-            dict[key!] = de.Value?.ToString() ?? string.Empty;
-        }
-        return dict;
-    }
-
-    private static string ExpandTokens(string input, IDictionary<string, string> vars)
-        => TokenRx.Replace(input, m =>
-        {
-            var key = m.Groups[1].Value;
-            return vars.TryGetValue(key, out var val) ? (val ?? string.Empty) : m.Value;
-        });
-
-    private static object? ExpandNodeTokens(object? node, IDictionary<string, string> vars)
-    {
-        if (node is null) return null;
-
-        return node switch
-        {
-            string s => ExpandTokens(s, vars),
-            IDictionary<string, object?> map => ExpandMapTokens(map, vars),
-            IEnumerable<object?> list => list.Select(item => ExpandNodeTokens(item, vars)).ToList(),
-            _ => node
-        };
-    }
-
-    private static IDictionary<string, object?> ExpandMapTokens(
-        IDictionary<string, object?> map,
-        IDictionary<string, string> vars)
-    {
-        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in map)
-        {
-            var newKey = ExpandTokens(kv.Key, vars);
-            var newVal = ExpandNodeTokens(kv.Value, vars);
-            result[newKey] = newVal;
-        }
-        return result;
     }
 
     private async Task ApplyAppSettingsAsync(
@@ -882,11 +750,11 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Highest specificity first
-        await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "env", env, "use-envvars.json"), result, ct);
+        await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "env", env, "use-envvars.json"),
+            result, ct);
         await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "use-envvars.json"), result, ct);
         await ReadAllowListFileAsync(Path.Combine(root, "stacks", stackId, "use-envvars.json"), result, ct);
-        await ReadAllowListFileAsync(Path.Combine(root, "stacks", "all", env, "env", "use-envvars.json"), result, ct); // env-scoped global allowlist
+        await ReadAllowListFileAsync(Path.Combine(root, "stacks", "all", "use-envvars.json"), result, ct);
 
         return result;
     }
@@ -918,6 +786,7 @@ public sealed class RenderExecutor : IRenderExecutor
                     var accept = v.ValueKind switch
                     {
                         JsonValueKind.True => true,
+                        JsonValueKind.False => false,
                         JsonValueKind.Number => v.TryGetInt32(out var n) && n != 0,
                         JsonValueKind.String => bool.TryParse(v.GetString(), out var b) && b,
                         _ => false
@@ -929,7 +798,230 @@ public sealed class RenderExecutor : IRenderExecutor
         }
         catch
         {
-            // ignore malformed allowlist
+            // ignore malformed
+        }
+    }
+
+    // ---------- token expansion ----------
+
+    private static Dictionary<string, string> GetProcessEnvironment()
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (DictionaryEntry de in Environment.GetEnvironmentVariables())
+        {
+            var key = de.Key?.ToString();
+            if (string.IsNullOrWhiteSpace(key)) continue;
+            dict[key] = de.Value?.ToString() ?? string.Empty;
+        }
+
+        return dict;
+    }
+
+    private static string ExpandTokens(string input, IDictionary<string, string> vars)
+        => TokenRx.Replace(input, m =>
+        {
+            var key = m.Groups[1].Value;
+            return vars.TryGetValue(key, out var val) ? (val ?? string.Empty) : m.Value;
+        });
+
+    private static object? ExpandNodeTokens(object? node, IDictionary<string, string> vars)
+    {
+        if (node is null) return null;
+
+        return node switch
+        {
+            string s => ExpandTokens(s, vars),
+            IDictionary<string, object?> map => ExpandMapTokens(map, vars),
+            IEnumerable<object?> list => list.Select(item => ExpandNodeTokens(item, vars)).ToList(),
+            _ => node
+        };
+    }
+
+    private static IDictionary<string, object?> ExpandMapTokens(IDictionary<string, object?> map,
+        IDictionary<string, string> vars)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in map)
+        {
+            var newKey = ExpandTokens(kv.Key, vars);
+            var newVal = ExpandNodeTokens(kv.Value, vars);
+            result[newKey] = newVal;
+        }
+
+        return result;
+    }
+
+    // ---------- secrets-map integration ----------
+
+    private async Task<Dictionary<string, string>> LoadSecretsMapAsync(
+        string root,
+        string env,
+        bool warnIfMissing,
+        CancellationToken ct)
+    {
+        var mapPath = Path.Combine(root, "ops", "vars", $"secrets-map.{env}.yml");
+
+        if (!File.Exists(mapPath))
+        {
+            if (warnIfMissing)
+                AnsiConsole.MarkupLine(
+                    $"[yellow]WARN:[/] secrets map not found for env [bold]{env}[/] at: {mapPath} — continuing without service secrets.");
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var map = await _yaml.LoadYamlAsync(mapPath, ct);
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var kv in map)
+        {
+            var val = kv.Value?.ToString();
+            if (!string.IsNullOrWhiteSpace(kv.Key) && !string.IsNullOrWhiteSpace(val))
+                dict[kv.Key] = val!;
+        }
+
+        return dict;
+    }
+
+    private static void AttachSecretsFromMap(
+        IDictionary<string, object?> svc,
+        IReadOnlyDictionary<string, string> secretsMap)
+    {
+        if (!svc.TryGetValue("x-sb-secrets", out var node) || node is null)
+            return;
+
+        // normalize existing service-level secrets to a list
+        var svcSecrets = new List<object?>();
+        if (svc.TryGetValue("secrets", out var existing))
+        {
+            if (existing is IEnumerable<object?> list)
+            {
+                svcSecrets.AddRange(list);
+            }
+            else if (existing is IDictionary<string, object?> dictLike)
+            {
+                foreach (var k in dictLike.Keys)
+                    svcSecrets.Add(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["source"] = k
+                    });
+            }
+        }
+
+        // collect / bubble for top-level 'secrets' (external: true)
+        var topBubble = svc.TryGetValue("x-sb-top-secrets", out var bubble) && bubble is IDictionary<string, object?> b
+            ? b
+            : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        // local helper: stable signature for dedup
+        static string SecretSig(IDictionary<string, object?> m)
+        {
+            string src = m.TryGetValue("source", out var sv) ? sv?.ToString() ?? "" : "";
+            string tgt = m.TryGetValue("target", out var tv) ? tv?.ToString() ?? "" : "";
+            string mode = m.TryGetValue("mode", out var mv) ? mv?.ToString() ?? "" : "";
+            string uid = m.TryGetValue("uid", out var uv) ? uv?.ToString() ?? "" : "";
+            string gid = m.TryGetValue("gid", out var gv) ? gv?.ToString() ?? "" : "";
+            return $"{src}|{tgt}|{mode}|{uid}|{gid}";
+        }
+
+        if (node is IEnumerable<object?> reqList)
+        {
+            foreach (var item in reqList)
+            {
+                string? key = null;
+                string? target = null;
+                object? mode = null; // string or int acceptable
+                object? uid = null; // string or int acceptable
+                object? gid = null; // string or int acceptable
+
+                if (item is string s)
+                {
+                    key = s;
+                }
+                else if (item is IDictionary<string, object?> m)
+                {
+                    if (m.TryGetValue("key", out var k) && k is not null)
+                        key = k.ToString();
+
+                    if (m.TryGetValue("target", out var t) && t is not null)
+                        target = t.ToString();
+
+                    if (m.TryGetValue("mode", out var md) && md is not null)
+                        mode = md;
+
+                    if (m.TryGetValue("uid", out var u) && u is not null)
+                        uid = u;
+
+                    if (m.TryGetValue("gid", out var g) && g is not null)
+                        gid = g;
+                }
+
+                if (string.IsNullOrWhiteSpace(key))
+                    continue;
+
+                // map'te karşılığı yoksa atla
+                if (!secretsMap.TryGetValue(key!, out var engineName) || string.IsNullOrWhiteSpace(engineName))
+                    continue;
+
+                var entry = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["source"] = engineName
+                };
+                if (!string.IsNullOrWhiteSpace(target)) entry["target"] = target;
+                if (mode is not null) entry["mode"] = mode;
+                if (uid is not null) entry["uid"] = uid;
+                if (gid is not null) entry["gid"] = gid;
+
+                var sig = SecretSig(entry);
+                var already = svcSecrets
+                    .OfType<IDictionary<string, object?>>()
+                    .Any(e => SecretSig(e) == sig);
+                if (!already)
+                    svcSecrets.Add(entry);
+
+                // bubble external top-level declaration
+                if (!topBubble.ContainsKey(engineName))
+                {
+                    topBubble[engineName] = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["external"] = true
+                    };
+                }
+            }
+        }
+
+        if (svcSecrets.Count > 0)
+            svc["secrets"] = svcSecrets;
+        else
+            svc.Remove("secrets");
+
+        if (topBubble.Count > 0)
+            svc["x-sb-top-secrets"] = topBubble;
+
+        // remove directive from final YAML
+        svc.Remove("x-sb-secrets");
+    }
+
+    private static void DeepMergeRoot(
+        IDictionary<string, object?> target,
+        IDictionary<string, object?> source)
+    {
+        foreach (var (k, v) in source)
+        {
+            if (v is IDictionary<string, object?> sMap)
+            {
+                if (!target.TryGetValue(k, out var tVal) || tVal is not IDictionary<string, object?> tMap)
+                {
+                    tMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    target[k] = tMap;
+                }
+
+                DeepMergeRoot((IDictionary<string, object?>)target[k]!, sMap);
+            }
+            else
+            {
+                // lists/scalars: override
+                target[k] = v;
+            }
         }
     }
 }

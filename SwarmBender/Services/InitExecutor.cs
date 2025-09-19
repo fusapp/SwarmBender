@@ -112,40 +112,30 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "vars"), dry, quiet, ct);
         Tally(r1, ref c, ref s);
 
+        // NEW: allowlist (global)
+        var rUseAll = await _fs.EnsureFileAsync(
+            Path.Combine(root, "stacks", "all", "use-envvars.json"),
+            _stub.UseEnvVarsDefaultJson,
+            dry, quiet, ct);
+        Tally(rUseAll, ref c, ref s);
+
         if (!noGlobalDefs)
         {
             foreach (var env in envs)
             {
                 var basePath = Path.Combine(root, "stacks", "all", env);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "env"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "labels"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "deploy"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "logging"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "mounts"), dry, quiet, ct);
+
+                // overlay folder for this environment (generic; no category subfolders)
+                r1 = await _fs.EnsureDirectoryAsync(basePath, dry, quiet, ct);
                 Tally(r1, ref c, ref s);
 
-                // Global env defaults and hierarchical appsettings stub
+                // env JSONs
+                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "env"), dry, quiet, ct);
+                Tally(r1, ref c, ref s);
                 r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "default.json"), _stub.EnvDefaultJson(env),
                     dry, quiet, ct);
                 Tally(r1, ref c, ref s);
                 r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "appsettings.json"), "{}", dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "labels", "default.yml"),
-                    _stub.LabelsDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "deploy", "default.yml"),
-                    _stub.DeployDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "logging", "default.yml"),
-                    _stub.LoggingDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "mounts", "default.yml"), _stub.MountsDefaultYaml,
-                    dry, quiet, ct);
                 Tally(r1, ref c, ref s);
             }
         }
@@ -154,11 +144,7 @@ public sealed class InitExecutor : IInitExecutor
         Tally(r1, ref c, ref s);
         r1 = await _fs.AppendGitignoreAsync(root, _stub.GitignoreLines, dry, quiet, ct);
         Tally(r1, ref c, ref s);
-        r1 = await _fs.EnsureFileAsync(
-            Path.Combine(root, "stacks", "all", "use-envvars.json"),
-            _stub.UseEnvVarsDefaultJson,
-            dry, quiet, ct);
-        Tally(r1, ref c, ref s);
+
         return (c, s);
     }
 
@@ -169,8 +155,6 @@ public sealed class InitExecutor : IInitExecutor
         var (c, s) = (0, 0);
         var stackRoot = Path.Combine(root, "stacks", stackId);
 
-     
-        
         var r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "stacks"), dry, quiet, ct);
         Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(stackRoot, dry, quiet, ct);
@@ -196,41 +180,33 @@ public sealed class InitExecutor : IInitExecutor
             Tally(r1, ref c, ref s);
         }
 
+        // NEW: allowlist (per-stack)
+        var rUseStack = await _fs.EnsureFileAsync(
+            Path.Combine(stackRoot, "use-envvars.json"),
+            _stub.UseEnvVarsDefaultJson,
+            dry, quiet, ct);
+        Tally(rUseStack, ref c, ref s);
+
         if (!noGlobalDefs && envs.Count > 0)
         {
             foreach (var env in envs)
             {
                 var basePath = Path.Combine(root, "stacks", "all", env);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "env"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "labels"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "deploy"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "logging"), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "mounts"), dry, quiet, ct);
+
+                // overlay folder for this environment (generic)
+                r1 = await _fs.EnsureDirectoryAsync(basePath, dry, quiet, ct);
                 Tally(r1, ref c, ref s);
 
-                // Global env defaults and hierarchical appsettings stub
+                // env JSONs
+                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "env"), dry, quiet, ct);
+                Tally(r1, ref c, ref s);
                 r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "default.json"), _stub.EnvDefaultJson(env),
                     dry, quiet, ct);
                 Tally(r1, ref c, ref s);
                 r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "appsettings.json"), "{}", dry, quiet, ct);
                 Tally(r1, ref c, ref s);
 
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "labels", "default.yml"),
-                    _stub.LabelsDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "deploy", "default.yml"),
-                    _stub.DeployDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "logging", "default.yml"),
-                    _stub.LoggingDefaultYaml(env), dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "mounts", "default.yml"), _stub.MountsDefaultYaml,
-                    dry, quiet, ct);
-                Tally(r1, ref c, ref s);
+                // NOTE: NO labels/deploy/logging/mounts subfolders anymore
             }
         }
 
@@ -239,12 +215,6 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "README.md"), _stub.OpsReadme, dry, quiet, ct);
         Tally(r1, ref c, ref s);
         r1 = await _fs.AppendGitignoreAsync(root, _stub.GitignoreLines, dry, quiet, ct);
-        Tally(r1, ref c, ref s);
-        
-        r1 = await _fs.EnsureFileAsync(
-            Path.Combine(stackRoot, "use-envvars.json"),
-            _stub.UseEnvVarsDefaultJson,
-            dry, quiet, ct);
         Tally(r1, ref c, ref s);
 
         return (c, s);

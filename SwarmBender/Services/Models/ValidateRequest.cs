@@ -1,9 +1,12 @@
 namespace SwarmBender.Services.Models;
 
-/// <summary>Request for validation.</summary>
 public sealed record ValidateRequest(
     string RootPath,
     string? StackId,
     IEnumerable<string> Environments,
     bool Quiet,
-    string? OutFile);
+    string? OutFile,
+    // NEW:
+    string AppSettingsMode = "env",                 // "env" or "config"
+    string AppSettingsTarget = "/app/appsettings.json" // used when AppSettingsMode == "config"
+);

@@ -5,19 +5,26 @@ using System.Linq;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using SwarmBender.Services.Abstractions;
 using SwarmBender.Services.Models;
 
 namespace SwarmBender.Services;
 
 /// <summary>
-/// Validates stacks against policies and basic schema (v2 + appsettings checks).
+/// Validates stacks against policies and basic schema (overlay-aware).
+/// - Runs a dry-run render per environment to catch overlay conflicts/missing pieces
+/// - Keeps image/labels/guardrails and secrets/configs shape checks
+/// - Validates appsettings*.json (parse) and required env keys
 /// </summary>
 public sealed class Validator : IValidator
 {
     private readonly IYamlLoader _yaml;
+    private readonly IRenderExecutor _renderer;
 
-    public Validator(IYamlLoader yaml) => _yaml = yaml;
+    public Validator(IYamlLoader yaml, IRenderExecutor renderer)
+        => (_yaml, _renderer) = (yaml, renderer);
 
     public async Task<ValidateResult> ValidateAsync(ValidateRequest request, CancellationToken ct = default)
     {
@@ -49,7 +56,7 @@ public sealed class Validator : IValidator
         var results = new List<StackValidationResult>();
         foreach (var stackId in stacks)
         {
-            var res = await ValidateSingleStackAsync(root, stackId, envs, ct);
+            var res = await ValidateSingleStackAsync(root, stackId, envs, request, ct);
             results.Add(res);
             await WriteReportAsync(root, res, ct);
         }
@@ -84,7 +91,7 @@ public sealed class Validator : IValidator
         return envs.Distinct().ToList();
     }
 
-    private async Task<StackValidationResult> ValidateSingleStackAsync(string root, string stackId, List<string> envs, CancellationToken ct)
+    private async Task<StackValidationResult> ValidateSingleStackAsync(string root, string stackId, List<string> envs, ValidateRequest request, CancellationToken ct)
     {
         var errors = new List<ValidationIssue>();
         var warnings = new List<ValidationIssue>();
@@ -114,7 +121,7 @@ public sealed class Validator : IValidator
         var requireResources = GetBool(guardRequire, "resources_limits", false);
         var suggestResources = GetBool(guardSuggest, "resources_limits", false);
 
-        // --- Template ---
+        // --- Template presence & basic compose keys ---
         var templatePath = Path.Combine(root, "stacks", stackId, "docker-stack.template.yml");
         if (!File.Exists(templatePath))
         {
@@ -147,11 +154,49 @@ public sealed class Validator : IValidator
             return new StackValidationResult(stackId, errors, warnings);
         }
 
+        // --- Overlay sanity via dry-run render (per env) ---
+        foreach (var env in envs)
+        {
+            try
+            {
+                var rr = new RenderRequest(
+                    RootPath: root,
+                    StackId: stackId,
+                    Environments: new[] { env },
+                    DryRun: true,
+                    Quiet: true,
+                    Preview: false,
+                    WriteHistory: false,
+                    OutDir: ".sb-validate",
+                    AppSettingsMode: request.AppSettingsMode,
+                    AppSettingsTarget: request.AppSettingsTarget
+                );
+                await _renderer.RenderAsync(rr, ct);
+            }
+            catch (DirectoryNotFoundException ex)
+            {
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, "RENDER_DIR_MISSING", $"[{env}] {ex.Message}", null));
+            }
+            catch (FileNotFoundException ex)
+            {
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, "RENDER_FILE_MISSING", $"[{env}] {ex.Message}", null));
+            }
+            catch (InvalidOperationException ex)
+            {
+                // overlay conflicts, missing sections, etc. from RenderExecutor
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, "OVERLAY_CONFLICT", $"[{env}] {ex.Message}", null));
+            }
+            catch (Exception ex)
+            {
+                errors.Add(new ValidationIssue(ValidationSeverity.Error, "RENDER_UNEXPECTED", $"[{env}] Unexpected during render: {ex.Message}", null));
+            }
+        }
+
         // --- appsettings*.json structural validation (global) ---
         foreach (var env in envs)
             await ValidateAppsettingsJsonDirAsync(Path.Combine(root, "stacks", "all", env, "env"), errors, ct);
 
-        // --- Metadata ---
+        // --- Metadata (read once) ---
         var aliasesPath = Path.Combine(root, "stacks", stackId, "aliases.yml");
         var aliases = await _yaml.LoadYamlAsync(aliasesPath, ct) ?? new Dictionary<string, object?>();
         var aliasMap = ToStringToStringMap(aliases);
@@ -208,7 +253,7 @@ public sealed class Validator : IValidator
                 var allowMatch = allowMatchers.Any(rx => rx.IsMatch(image));
                 if (!allowMatch)
                 {
-                    var hasDigest = image.Contains("@sha256:", StringComparison.OrdinalIgnoreCase);
+                    var hasDigest = image.Contains("@sha256:", StringComparison.OrdinalIgnoreCase); // fixed: Contains
                     var hasColon = image.Contains(':');
                     var hasTag = hasColon && !image.EndsWith(':');
                     var tag = hasTag ? image[(image.LastIndexOf(':') + 1)..] : "";
@@ -261,10 +306,11 @@ public sealed class Validator : IValidator
         var templateServices = (IDictionary<string, object?>)template["services"];
         foreach (var svcName in templateServices.Keys)
         {
-            var canonical = aliasMap.TryGetValue(svcName, out var c) ? c : svcName;
-            var requiredForSvc = reqServiceKeys.TryGetValue(canonical, out var list) ? list : new List<string>();
-            var grp = groupMap.TryGetValue(canonical, out var g) ? g : null;
-            var requiredForGroup = (grp is not null && reqGroupKeys.TryGetValue(grp, out var gl)) ? gl : new List<string>();
+            var canonical2 = aliasMap.TryGetValue(svcName, out var c2) ? c2 : svcName;
+
+            var requiredForSvc = reqServiceKeys.TryGetValue(canonical2, out var list2) ? list2 : new List<string>();
+            var grp2 = groupMap.TryGetValue(canonical2, out var g2) ? g2 : null;
+            var requiredForGroup = (grp2 is not null && reqGroupKeys.TryGetValue(grp2, out var gl2)) ? gl2 : new List<string>();
             var required = requiredForSvc.Concat(requiredForGroup).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
             if (required.Count == 0)
@@ -272,11 +318,11 @@ public sealed class Validator : IValidator
 
             foreach (var env in envs)
             {
-                var foundKeys = await CollectConfigKeysAsync(root, canonical, env, templatePath, templateServices, svcName, ct);
+                var foundKeys = await CollectConfigKeysAsync(root, canonical2, env, templatePath, templateServices, svcName, ct);
                 foreach (var rk in required)
                 {
                     if (!foundKeys.Contains(rk))
-                        errors.Add(new ValidationIssue(ValidationSeverity.Error, "ENV_REQUIRED_MISSING", $"[{env}] Service '{canonical}' missing required config key '{rk}' in template/baselines/appsettings.", null, $"env:{env}:{canonical}:{rk}"));
+                        errors.Add(new ValidationIssue(ValidationSeverity.Error, "ENV_REQUIRED_MISSING", $"[{env}] Service '{canonical2}' missing required config key '{rk}' in template/baselines/appsettings.", null, $"env:{env}:{canonical2}:{rk}"));
                 }
             }
         }

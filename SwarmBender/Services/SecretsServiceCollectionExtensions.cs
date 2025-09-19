@@ -10,6 +10,7 @@ public static class SecretsServiceCollectionExtensions
         services.AddSingleton<SecretPolicyLoader>();
         services.AddSingleton<ISecretNameStrategy, SecretNameStrategy>();
         services.AddSingleton<ISecretProvidersHub, ProvidersHub>();
+        services.AddSingleton<ISecretsProviderFactory, ProvidersHub>();
 
         // Providers
         services.AddSingleton<ISecretSourceProvider, EnvSecretSourceProvider>();
@@ -22,6 +23,7 @@ public static class SecretsServiceCollectionExtensions
         services.AddSingleton<ISecretsSyncService, SecretsSyncService>();
         services.AddSingleton<ISecretsPruneService, SecretsPruneService>();
         services.AddSingleton<ISecretsDoctorService, SecretsDoctorService>();
+        services.AddSingleton<ISecretsRotateService, SecretsRotateService>(); 
 
         // Engine selection via ENV:
         //   SB_SECRETS_ENGINE=docker-cli

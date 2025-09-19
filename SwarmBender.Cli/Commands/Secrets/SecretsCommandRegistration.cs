@@ -12,6 +12,7 @@ public static class SecretsCommandRegistration
             b.AddCommand<SecretsSyncCommand>("sync").WithDescription("Sync secrets from providers into Docker Swarm and write secrets map.");
             b.AddCommand<SecretsPruneCommand.Exec>("prune").WithDescription("Prune old secret versions based on retain policy.");
             b.AddCommand<SecretsDoctorCommand.Exec>("doctor").WithDescription("Check consistency between secrets-map and Docker Engine.");
+            b.AddCommand<SecretsRotateCommand>("rotate");
         });
     }
 }

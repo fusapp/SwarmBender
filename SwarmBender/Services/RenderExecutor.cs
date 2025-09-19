@@ -13,22 +13,24 @@ using SwarmBender.Services.Models;
 namespace SwarmBender.Services;
 
 /// <summary>
-/// Renderer v1.5
+/// Renderer v1.6
 /// - Layered composition (template + stacks/all + services/<svc>)
 /// - appsettings*.json: env (flatten) | config (swarm config + mount)
 /// - ${VAR} token interpolation (keys & string values)
-/// - Process ENV with allowlist:
+/// - Process ENV with allowlist (use-envvars.json):
 ///     * Keys from files (JSON/appsettings) are protected (file wins)
 ///     * Template keys may be overridden by process env
 ///     * New keys are added only if present in use-envvars.json
 /// - Special ${ENVVARS} -> space-joined "KEY=VALUE" of final service env (after allowlist & precedence)
-/// - use-envvars.json lookup: svc/env -> svc -> stack -> stacks/all
+/// - Healthcheck test forced to flow sequence: ["CMD", "curl", ...]
+/// - NEW: environment written as block sequence of "KEY=VALUE" items
+///         (preserves template order first, then appends others alphabetically)
 /// </summary>
 public sealed class RenderExecutor : IRenderExecutor
 {
     private static readonly ISerializer YamlWriter = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
-        .WithTypeConverter(new FlowSeqYamlConverter()) // <-- added
+        .WithTypeConverter(new FlowSeqYamlConverter()) // for healthcheck.test flow style
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -87,7 +89,9 @@ public sealed class RenderExecutor : IRenderExecutor
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "secrets.yml"), "secrets", ct);
             await MergeTopLevelAsync(rendered, Path.Combine(stackRoot, "configs.yml"), "configs", ct);
 
+            // style hints (healthcheck.test -> flow seq)
             ApplyYamlStyleHints(rendered);
+
             var yaml = YamlWriter.Serialize(rendered);
 
             var outDir = Path.IsPathRooted(request.OutDir) ? request.OutDir : Path.Combine(root, request.OutDir);
@@ -130,11 +134,14 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var svc = new Dictionary<string, object?>(templateSvc, StringComparer.OrdinalIgnoreCase);
 
+        // --- capture template env order (if any) before normalization ---
+        var templateEnvOrder = ExtractEnvKeyOrderFromNode(templateSvc.TryGetValue("environment", out var rawEnvNode) ? rawEnvNode : null);
+
         // Track keys sourced from files (JSON/appsettings) -> file wins over process env
         var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // --- ENVIRONMENT (template base) ---
-        var envVars = MergeHelpers.NormalizeEnvironment(svc.TryGetValue("environment", out var envNode) ? envNode : null);
+        var envVars = MergeHelpers.NormalizeEnvironment(rawEnvNode);
 
         // Merge from global/service JSON (skip appsettings when mode=config)
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
@@ -170,9 +177,6 @@ public sealed class RenderExecutor : IRenderExecutor
             }
         }
 
-        if (envVars.Count > 0)
-            svc["environment"] = MergeHelpers.EnvironmentToYaml(envVars);
-
         // --- LABELS (normalize deploy.labels -> service.labels) ---
         var labelDict = MergeHelpers.NormalizeLabels(svc.TryGetValue("labels", out var labelsNode) ? labelsNode : null);
 
@@ -191,10 +195,10 @@ public sealed class RenderExecutor : IRenderExecutor
             svc["labels"] = MergeHelpers.LabelsToYaml(labelDict);
 
         // --- DEPLOY ---
-        var deploy = svc.TryGetValue("deploy", out var d) && d is IDictionary<string, object?> dm ? new Dictionary<string, object?>(dm, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        await MergeYamlAreaAsync(Path.Combine(root, "stacks", "all", env, "deploy"), deploy, ct);
-        await MergeYamlAreaAsync(Path.Combine(root, "services", canonicalService, "deploy", env), deploy, ct);
-        if (deploy.Count > 0) svc["deploy"] = deploy;
+        var deploy2 = svc.TryGetValue("deploy", out var d) && d is IDictionary<string, object?> dm ? new Dictionary<string, object?>(dm, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        await MergeYamlAreaAsync(Path.Combine(root, "stacks", "all", env, "deploy"), deploy2, ct);
+        await MergeYamlAreaAsync(Path.Combine(root, "services", canonicalService, "deploy", env), deploy2, ct);
+        if (deploy2.Count > 0) svc["deploy"] = deploy2;
 
         // --- LOGGING ---
         var logging = svc.TryGetValue("logging", out var lg) && lg is IDictionary<string, object?> lgm ? new Dictionary<string, object?>(lgm, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -220,8 +224,93 @@ public sealed class RenderExecutor : IRenderExecutor
         // Special ${ENVVARS}
         tokenVars["ENVVARS"] = BuildEnvVarsInline(tokenVars: envVars);
 
+        // Put env as sequence of "KEY=VALUE" (preserve template order first)
+        svc["environment"] = BuildEnvironmentSequence(envVars, templateEnvOrder);
+
+        // Expand tokens across the service map (including environment list items)
         var svcExpanded = ExpandMapTokens(svc, tokenVars);
         return svcExpanded;
+    }
+
+    // ---- environment helpers ----
+
+    private static List<string> ExtractEnvKeyOrderFromNode(object? envNode)
+    {
+        var order = new List<string>();
+        if (envNode is IEnumerable<object?> list)
+        {
+            foreach (var item in list)
+            {
+                var s = item?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(s)) continue;
+                var idx = s.IndexOf('=');
+                var key = idx >= 0 ? s[..idx] : s;
+                if (!string.IsNullOrWhiteSpace(key))
+                    order.Add(key);
+            }
+        }
+        else if (envNode is IDictionary<string, object?> map)
+        {
+            foreach (var k in map.Keys)
+                if (!string.IsNullOrWhiteSpace(k))
+                    order.Add(k);
+        }
+        return order;
+    }
+
+    private static IList<object?> BuildEnvironmentSequence(IDictionary<string, string> envVars, IList<string>? preferredOrder)
+    {
+        var result = new List<object?>();
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (preferredOrder is not null)
+        {
+            foreach (var k in preferredOrder)
+            {
+                if (envVars.TryGetValue(k, out var v))
+                {
+                    result.Add($"{k}={v}");
+                    seen.Add(k);
+                }
+            }
+        }
+
+        foreach (var k in envVars.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            if (seen.Contains(k)) continue;
+            result.Add($"{k}={envVars[k]}");
+        }
+
+        return result;
+    }
+
+    private static string BuildEnvVarsInline(IDictionary<string, string> tokenVars)
+    {
+        // Deterministic order for reproducible renders
+        var parts = tokenVars.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+                             .Select(kv => $"{kv.Key}={kv.Value}");
+        return string.Join(' ', parts);
+    }
+
+    // ---- style hints (healthcheck.test -> flow seq) ----
+    private static void ApplyYamlStyleHints(IDictionary<string, object?> root)
+    {
+        if (!root.TryGetValue("services", out var svcsNode) || svcsNode is not IDictionary<string, object?> services)
+            return;
+
+        foreach (var svc in services.Values.OfType<IDictionary<string, object?>>())
+        {
+            if (!svc.TryGetValue("healthcheck", out var hcNode) || hcNode is not IDictionary<string, object?> hc)
+                continue;
+
+            if (hc.TryGetValue("test", out var testNode))
+            {
+                if (testNode is IEnumerable<object?> seq && testNode is not FlowSeq)
+                {
+                    hc["test"] = new FlowSeq(seq);
+                }
+            }
+        }
     }
 
     private async Task<HashSet<string>> LoadAllowListAsync(
@@ -233,13 +322,9 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // svc/env
         await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "env", env, "use-envvars.json"), result, ct);
-        // svc
         await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "use-envvars.json"), result, ct);
-        // stack
         await ReadAllowListFileAsync(Path.Combine(root, "stacks", stackId, "use-envvars.json"), result, ct);
-        // stacks/all (optional)
         await ReadAllowListFileAsync(Path.Combine(root, "stacks", "all", "use-envvars.json"), result, ct);
 
         return result;
@@ -268,7 +353,6 @@ public sealed class RenderExecutor : IRenderExecutor
             {
                 foreach (var prop in doc.RootElement.EnumerateObject())
                 {
-                    // accept { "KEY": true/1/"true" } forms
                     var v = prop.Value;
                     var accept = v.ValueKind switch
                     {
@@ -286,14 +370,6 @@ public sealed class RenderExecutor : IRenderExecutor
         {
             // ignore malformed file
         }
-    }
-
-    private static string BuildEnvVarsInline(IDictionary<string, string> tokenVars)
-    {
-        // Deterministic order for reproducible renders
-        var parts = tokenVars.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
-                             .Select(kv => $"{kv.Key}={kv.Value}");
-        return string.Join(' ', parts);
     }
 
     private async Task ApplyAppSettingsAsync(
@@ -550,27 +626,5 @@ public sealed class RenderExecutor : IRenderExecutor
             result[newKey] = newVal;
         }
         return result;
-    }
-    
-    private static void ApplyYamlStyleHints(IDictionary<string, object?> root)
-    {
-        if (!root.TryGetValue("services", out var svcsNode) || svcsNode is not IDictionary<string, object?> services)
-            return;
-
-        foreach (var svc in services.Values.OfType<IDictionary<string, object?>>())
-        {
-            if (!svc.TryGetValue("healthcheck", out var hcNode) || hcNode is not IDictionary<string, object?> hc)
-                continue;
-
-            if (hc.TryGetValue("test", out var testNode))
-            {
-                // Only convert lists to FlowSeq; leave strings as-is (e.g. "CMD-SHELL ...")
-                if (testNode is IEnumerable<object?> seq && testNode is not FlowSeq)
-                {
-                    // preserve current order
-                    hc["test"] = new FlowSeq(seq);
-                }
-            }
-        }
     }
 }

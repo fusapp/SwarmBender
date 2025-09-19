@@ -1,5 +1,4 @@
 // File: SwarmBender/Services/RenderExecutor.cs
-
 using Spectre.Console;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -14,23 +13,25 @@ using SwarmBender.Services.Models;
 namespace SwarmBender.Services;
 
 /// <summary>
-/// Renderer v1.8
-/// - Generic YAML overlays:
-///     stacks/all/<env>/*.yml|yaml   (lowest)
+/// Renderer v1.9
+/// - Root overlays (env scoped):
+///     stacks/all/<env>/*.yml|yaml      (lowest)
 ///     stacks/<stackId>/<env>/*.yml|yaml
-///     services/<svc>/<env>/*.yml|yaml (highest, service-scoped)
+/// - Stack overlays with wildcard:
+///     stacks/all/<env>/stack/*.yml|yaml
+///     stacks/<stackId>/<env>/stack/*.yml|yaml   (highest; last wins)
 /// - Keeps special formatting:
 ///     * healthcheck.test -> flow sequence
 ///     * environment -> list of "KEY=VALUE"
 ///     * labels -> list of "key=value"
 /// - Token interpolation (${VAR}, ${ENVVARS})
-/// - Process env allowlist via use-envvars.json, file > process precedence
+/// - Process env allowlist via use-envvars.json (file > process precedence)
 /// </summary>
 public sealed class RenderExecutor : IRenderExecutor
 {
     private static readonly ISerializer YamlWriter = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
-        .WithTypeConverter(new FlowSeqYamlConverter()) // healthcheck.test flow array
+        .WithTypeConverter(new FlowSeqYamlConverter()) // keep healthcheck.test as flow array
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -53,25 +54,29 @@ public sealed class RenderExecutor : IRenderExecutor
 
         // Load template into a mutable map
         var template = await _yaml.LoadYamlAsync(templatePath, ct);
-        var rendered = new Dictionary<string, object?>(template, StringComparer.OrdinalIgnoreCase);
-
-        // 1) ROOT-LEVEL OVERLAYS (global -> stack)
         var envs = request.Environments.Select(e => e.ToLowerInvariant()).ToList();
         var outputs = new List<RenderOutput>();
 
         foreach (var env in envs)
         {
-            // Start from template each env
-            rendered = new Dictionary<string, object?>(template, StringComparer.OrdinalIgnoreCase);
+            // Start from template for each env
+            IDictionary<string, object?> rendered =
+                new Dictionary<string, object?>(template, StringComparer.OrdinalIgnoreCase);
 
-            // Merge stacks/all/<env>/*.yml|yaml
+
+            // 1) ROOT-LEVEL overlays (no wildcard semantics; conflict-checked deep-merge)
             await MergeRootOverlayDirAsync(rendered, Path.Combine(root, "stacks", "all", env), ct);
-            // Merge stacks/<stackId>/<env>/*.yml|yaml
             await MergeRootOverlayDirAsync(rendered, Path.Combine(stackRoot, env), ct);
 
+            // 2) STACK overlays with wildcard support (services: "*" + per-service)
+            rendered = await ApplyOverlaysAsync(root, request.StackId!, env, rendered, request.Quiet, ct);
+
             if (!rendered.TryGetValue("services", out var servicesNode) ||
-                servicesNode is not IDictionary<string, object?> baseServices)
+                servicesNode is not IDictionary<string, object?> baseServices ||
+                baseServices.Count == 0)
+            {
                 throw new InvalidOperationException("Template/overlays missing 'services' section.");
+            }
 
             // aliases (optional)
             var aliasMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -85,7 +90,7 @@ public sealed class RenderExecutor : IRenderExecutor
 
             var finalServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
-            // Iterate services after root overlays (includes any added services)
+            // Iterate services after all overlays (includes any added services)
             var serviceKeys = baseServices.Keys.ToList();
             foreach (var svcKey in serviceKeys)
             {
@@ -149,9 +154,8 @@ public sealed class RenderExecutor : IRenderExecutor
         IDictionary<string, object?> svc,
         CancellationToken ct)
     {
-        // 2) SERVICE-LEVEL OVERLAYS (highest precedence)
-        await MergeServiceOverlayDirAsync(Path.Combine(root, "services", canonicalService, env), canonicalService, svc,
-            ct);
+        // 3) SERVICE-LEVEL overlays (highest precedence, per service)
+        await MergeServiceOverlayDirAsync(Path.Combine(root, "services", canonicalService, env), canonicalService, svc, ct);
 
         // Capture environment & labels order AFTER overlays
         var templateEnvOrder =
@@ -173,7 +177,8 @@ public sealed class RenderExecutor : IRenderExecutor
         var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // --- ENVIRONMENT (build known keys from current 'environment' + files) ---
-        var envVars = MergeHelpers.NormalizeEnvironment(rawEnvNode);
+        var envVars = MergeHelpers.NormalizeEnvironment(
+            svc.TryGetValue("environment", out var initialEnvNode) ? initialEnvNode : null);
 
         // Merge from global/service JSON (skip appsettings when mode=config)
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
@@ -186,11 +191,11 @@ public sealed class RenderExecutor : IRenderExecutor
             skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
             fileKeys);
 
-        // appsettings: may add/override env vars (env mode)
+        // appsettings: may add/override env vars (env mode) OR produce config (config mode)
         await ApplyAppSettingsAsync(root, request, canonicalService, env, envVars, svc, fileKeys, ct);
 
         // --- Process env overlay with allowlist ---
-        var allow = await LoadAllowListAsync(root, request.StackId, canonicalService, env, ct);
+        var allow = await LoadAllowListAsync(root, request.StackId!, canonicalService, env, ct);
         var processEnv = GetProcessEnvironment();
 
         foreach (var kv in processEnv)
@@ -223,14 +228,11 @@ public sealed class RenderExecutor : IRenderExecutor
             deployMap.Remove("labels");
         }
 
-        // >>> Write labels as sequence of "key=value" (template order first)
+        // Write labels as sequence of "key=value" (template order first)
         if (labelDict.Count > 0)
             svc["labels"] = BuildLabelsSequence(labelDict, templateLabelsOrder);
         else
             svc.Remove("labels");
-
-        // --- DEPLOY / LOGGING / MOUNTS ---
-        // No special dirs anymore; any YAML keys come via overlays.
 
         // ---- Token interpolation vars ----
         var tokenVars = new Dictionary<string, string>(envVars, StringComparer.OrdinalIgnoreCase);
@@ -241,7 +243,7 @@ public sealed class RenderExecutor : IRenderExecutor
         // Special ${ENVVARS}
         tokenVars["ENVVARS"] = BuildEnvVarsInline(tokenVars: envVars);
 
-        // Put env as sequence of "KEY=VALUE" (preserve order from current template/overlays first)
+        // Put env as sequence of "KEY=VALUE" (preserve order from template/overlays first)
         svc["environment"] = BuildEnvironmentSequence(envVars, templateEnvOrder);
 
         // Expand tokens across the service map (including environment & labels list items)
@@ -250,6 +252,7 @@ public sealed class RenderExecutor : IRenderExecutor
     }
 
     // ---------- Overlays helpers ----------
+
     /// <summary>
     /// Deep-merge without filename-based precedence. If the same scalar path is set
     /// to different values across multiple files in the SAME directory, record a conflict.
@@ -271,19 +274,16 @@ public sealed class RenderExecutor : IRenderExecutor
             {
                 if (!target.TryGetValue(key, out var tgtVal) || tgtVal is not IDictionary<string, object?> tgtMap)
                 {
-                    // target'da yoksa yeni map aç
                     tgtMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                     target[key] = tgtMap;
                 }
 
-                // Her iki taraf da map ise derin birleşim
                 if (target[key] is IDictionary<string, object?> tgtMap2)
                 {
                     MergeMapNoConflict(tgtMap2, srcMap, path, conflicts);
                 }
                 else
                 {
-                    // target scalar/list iken src map => tip çakışması
                     conflicts.Add($"{path} (type mismatch)");
                 }
             }
@@ -291,7 +291,6 @@ public sealed class RenderExecutor : IRenderExecutor
             {
                 if (target.TryGetValue(key, out var existing))
                 {
-                    // Map vs scalar/list veya farklı scalar/list değerleri => çakışma
                     if (existing is IDictionary<string, object?>)
                     {
                         conflicts.Add($"{path} (type mismatch)");
@@ -300,7 +299,6 @@ public sealed class RenderExecutor : IRenderExecutor
                     {
                         conflicts.Add($"{path}");
                     }
-                    // eşitse sessizce geç
                 }
                 else
                 {
@@ -315,18 +313,16 @@ public sealed class RenderExecutor : IRenderExecutor
         if (ReferenceEquals(a, b)) return true;
         if (a is null || b is null) return false;
 
-        // primitives
         if (a is string sa && b is string sb) return string.Equals(sa, sb, StringComparison.Ordinal);
-        if (a is bool ba && b is bool bb2) return ba == bb2;                // <-- bb -> bb2
+        if (a is bool ba && b is bool bb2) return ba == bb2;
         if (a is int ia && b is int ib) return ia == ib;
         if (a is long la && b is long lb) return la == lb;
         if (a is double da && b is double db) return da.Equals(db);
 
-        // lists
         if (a is IEnumerable<object?> ea && b is IEnumerable<object?> eb)
         {
-            var listA = ea.ToList();                                        // <-- aa -> listA
-            var listB = eb.ToList();                                        // <-- bb -> listB
+            var listA = ea.ToList();
+            var listB = eb.ToList();
             if (listA.Count != listB.Count) return false;
             for (int i = 0; i < listA.Count; i++)
                 if (!ObjectsEqual(listA[i], listB[i])) return false;
@@ -341,12 +337,12 @@ public sealed class RenderExecutor : IRenderExecutor
         if (!Directory.Exists(dir)) return;
 
         var conflicts = new List<string>();
-
         foreach (var file in Directory.GetFiles(dir).Where(f =>
                      f.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
                      f.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)))
         {
             var map = await _yaml.LoadYamlAsync(file, ct);
+            if (map is null || map.Count == 0) continue;
             MergeMapNoConflict(target, map, prefix: "", conflicts);
         }
 
@@ -358,7 +354,8 @@ public sealed class RenderExecutor : IRenderExecutor
         }
     }
 
-    private async Task MergeServiceOverlayDirAsync(string dir, string canonicalService, IDictionary<string, object?> svc, CancellationToken ct)
+    private async Task MergeServiceOverlayDirAsync(string dir, string canonicalService,
+        IDictionary<string, object?> svc, CancellationToken ct)
     {
         if (!Directory.Exists(dir)) return;
 
@@ -369,14 +366,16 @@ public sealed class RenderExecutor : IRenderExecutor
                      f.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)))
         {
             var map = await _yaml.LoadYamlAsync(file, ct);
+            if (map is null || map.Count == 0) continue;
 
-            // Case 1: services:<svc>: subtree verilmişse
+            // Case 1: services:<svc>: subtree
             if (map.TryGetValue("services", out var sNode) && sNode is IDictionary<string, object?> services &&
-                services.TryGetValue(canonicalService, out var svcNode) && svcNode is IDictionary<string, object?> svcMap)
+                services.TryGetValue(canonicalService, out var svcNode) &&
+                svcNode is IDictionary<string, object?> svcMap)
             {
                 MergeMapNoConflict(svc, svcMap, prefix: "", conflicts);
             }
-            // Case 2: doğrudan servis fragmanı (deploy:, logging:, labels:, healthcheck: ...)
+            // Case 2: direct fragment (deploy:, logging:, labels:, healthcheck:, etc.)
             else
             {
                 MergeMapNoConflict(svc, map, prefix: "", conflicts);
@@ -388,6 +387,127 @@ public sealed class RenderExecutor : IRenderExecutor
             var msg = $"Overlay conflict(s) detected under '{dir}' for service '{canonicalService}':\n - " +
                       string.Join("\n - ", conflicts.Distinct(StringComparer.OrdinalIgnoreCase));
             throw new InvalidOperationException(msg);
+        }
+    }
+
+    // ---------- Stack overlays with wildcard support ----------
+
+    private async Task<IDictionary<string, object?>> ApplyOverlaysAsync(
+        string root,
+        string stackId,
+        string env,
+        IDictionary<string, object?> baseDoc,
+        bool quiet,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<string, object?>(baseDoc, StringComparer.OrdinalIgnoreCase);
+
+        async Task ApplyDirectoryAsync(string dir)
+        {
+            if (!Directory.Exists(dir)) return;
+
+            var files = Directory.EnumerateFiles(dir, "*.yml")
+                .Concat(Directory.EnumerateFiles(dir, "*.yaml"))
+                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var file in files)
+            {
+                var overlay = await _yaml.LoadYamlAsync(file, ct);
+                if (overlay is null || overlay.Count == 0)
+                    continue;
+
+                // Merge non-services root keys directly
+                if (overlay.TryGetValue("services", out _))
+                {
+                    var nonServices = overlay
+                        .Where(kv => !string.Equals(kv.Key, "services", StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+                    DeepMergeRoot(result, nonServices);
+                }
+                else
+                {
+                    DeepMergeRoot(result, overlay);
+                }
+
+                // Merge services with wildcard support
+                if (overlay.TryGetValue("services", out var servicesNode) &&
+                    servicesNode is IDictionary<string, object?> ovServices)
+                {
+                    if (!result.TryGetValue("services", out var baseServicesNode) ||
+                        baseServicesNode is not IDictionary<string, object?> baseServices)
+                    {
+                        baseServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                        result["services"] = baseServices;
+                    }
+
+                    ApplyServicesOverlay(baseServices, ovServices);
+                }
+
+                if (!quiet)
+                    AnsiConsole.MarkupLine($"[grey]overlay applied:[/] {file}");
+            }
+        }
+
+        // global stack overlays first, then stack-specific (last wins)
+        await ApplyDirectoryAsync(Path.Combine(root, "stacks", "all", env, "stack"));
+        await ApplyDirectoryAsync(Path.Combine(root, "stacks", stackId, env, "stack"));
+
+        return result;
+    }
+
+    private static void DeepMergeRoot(
+        IDictionary<string, object?> target,
+        IDictionary<string, object?> source)
+    {
+        foreach (var (k, v) in source)
+        {
+            if (v is IDictionary<string, object?> sMap &&
+                target.TryGetValue(k, out var tVal) &&
+                tVal is IDictionary<string, object?> tMap)
+            {
+                DeepMergeRoot(tMap, sMap);
+            }
+            else
+            {
+                target[k] = v; // lists/scalars: replace
+            }
+        }
+    }
+
+    private static void ApplyServicesOverlay(
+        IDictionary<string, object?> baseServices,
+        IDictionary<string, object?> overlayServices)
+    {
+        // 1) wildcard first
+        if (overlayServices.TryGetValue("*", out var wild) &&
+            wild is IDictionary<string, object?> wildMap)
+        {
+            foreach (var svcName in baseServices.Keys.ToList())
+            {
+                var baseMap = baseServices[svcName] as IDictionary<string, object?>
+                              ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                DeepMergeRoot(baseMap, wildMap);
+                baseServices[svcName] = baseMap;
+            }
+        }
+
+        // 2) explicit services
+        foreach (var kv in overlayServices)
+        {
+            if (kv.Key == "*") continue;
+
+            var ovMap = kv.Value as IDictionary<string, object?>
+                        ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            if (!baseServices.TryGetValue(kv.Key, out var baseNode) ||
+                baseNode is not IDictionary<string, object?> baseMap)
+            {
+                baseMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                baseServices[kv.Key] = baseMap;
+            }
+
+            DeepMergeRoot(baseMap, ovMap);
         }
     }
 
@@ -418,7 +538,8 @@ public sealed class RenderExecutor : IRenderExecutor
         return order;
     }
 
-    private static IList<object?> BuildEnvironmentSequence(IDictionary<string, string> envVars,
+    private static IList<object?> BuildEnvironmentSequence(
+        IDictionary<string, string> envVars,
         IList<string>? preferredOrder)
     {
         var result = new List<object?>();
@@ -471,7 +592,9 @@ public sealed class RenderExecutor : IRenderExecutor
         }
     }
 
-    private static IList<object?> BuildLabelsSequence(IDictionary<string, string> labels, IList<string>? preferredOrder)
+    private static IList<object?> BuildLabelsSequence(
+        IDictionary<string, string> labels,
+        IList<string>? preferredOrder)
     {
         var result = new List<object?>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -528,7 +651,10 @@ public sealed class RenderExecutor : IRenderExecutor
 
     // ---------- top-level helpers ----------
 
-    private async Task MergeTopLevelAsync(IDictionary<string, object?> rendered, string filePath, string topKey,
+    private async Task MergeTopLevelAsync(
+        IDictionary<string, object?> rendered,
+        string filePath,
+        string topKey,
         CancellationToken ct)
     {
         // bubble up appsettings-generated configs (from services)
@@ -566,8 +692,12 @@ public sealed class RenderExecutor : IRenderExecutor
         rendered[topKey] = target;
     }
 
-    private async Task MergeJsonEnvDirAsync(string dir, IDictionary<string, string> env, bool skipAppSettings,
-        CancellationToken ct, ISet<string>? fileKeys = null)
+    private async Task MergeJsonEnvDirAsync(
+        string dir,
+        IDictionary<string, string> env,
+        bool skipAppSettings,
+        CancellationToken ct,
+        ISet<string>? fileKeys = null)
     {
         if (!Directory.Exists(dir)) return;
         foreach (var file in Directory.GetFiles(dir, "*.json"))
@@ -606,9 +736,8 @@ public sealed class RenderExecutor : IRenderExecutor
         {
             var key = de.Key?.ToString();
             if (string.IsNullOrWhiteSpace(key)) continue;
-            dict[key] = de.Value?.ToString() ?? string.Empty;
+            dict[key!] = de.Value?.ToString() ?? string.Empty;
         }
-
         return dict;
     }
 
@@ -623,23 +752,17 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         if (node is null) return null;
 
-        switch (node)
+        return node switch
         {
-            case string s:
-                return ExpandTokens(s, vars);
-            case IDictionary<string, object?> map:
-                return ExpandMapTokens(map, vars);
-            case IEnumerable<object?> list:
-                var newList = new List<object?>();
-                foreach (var item in list)
-                    newList.Add(ExpandNodeTokens(item, vars));
-                return newList;
-            default:
-                return node;
-        }
+            string s => ExpandTokens(s, vars),
+            IDictionary<string, object?> map => ExpandMapTokens(map, vars),
+            IEnumerable<object?> list => list.Select(item => ExpandNodeTokens(item, vars)).ToList(),
+            _ => node
+        };
     }
 
-    private static IDictionary<string, object?> ExpandMapTokens(IDictionary<string, object?> map,
+    private static IDictionary<string, object?> ExpandMapTokens(
+        IDictionary<string, object?> map,
         IDictionary<string, string> vars)
     {
         var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -649,10 +772,8 @@ public sealed class RenderExecutor : IRenderExecutor
             var newVal = ExpandNodeTokens(kv.Value, vars);
             result[newKey] = newVal;
         }
-
         return result;
     }
-
 
     private async Task ApplyAppSettingsAsync(
         string root,
@@ -761,12 +882,11 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Highest specificity first (later eklenenler set'e zaten idempotent eklenir)
-        await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "env", env, "use-envvars.json"),
-            result, ct);
+        // Highest specificity first
+        await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "env", env, "use-envvars.json"), result, ct);
         await ReadAllowListFileAsync(Path.Combine(root, "services", canonicalService, "use-envvars.json"), result, ct);
         await ReadAllowListFileAsync(Path.Combine(root, "stacks", stackId, "use-envvars.json"), result, ct);
-        await ReadAllowListFileAsync(Path.Combine(root, "stacks", "all", "use-envvars.json"), result, ct);
+        await ReadAllowListFileAsync(Path.Combine(root, "stacks", "all", env, "env", "use-envvars.json"), result, ct); // env-scoped global allowlist
 
         return result;
     }
@@ -781,7 +901,6 @@ public sealed class RenderExecutor : IRenderExecutor
 
             if (doc.RootElement.ValueKind == JsonValueKind.Array)
             {
-                // ["KEY1","KEY2", ...]
                 foreach (var el in doc.RootElement.EnumerateArray())
                 {
                     if (el.ValueKind == JsonValueKind.String)
@@ -793,7 +912,6 @@ public sealed class RenderExecutor : IRenderExecutor
             }
             else if (doc.RootElement.ValueKind == JsonValueKind.Object)
             {
-                // { "KEY1": true, "KEY2": 1, "KEY3": "true" }
                 foreach (var prop in doc.RootElement.EnumerateObject())
                 {
                     var v = prop.Value;
@@ -811,7 +929,7 @@ public sealed class RenderExecutor : IRenderExecutor
         }
         catch
         {
-            // malformed dosyayı sessizce yoksay
+            // ignore malformed allowlist
         }
     }
 }

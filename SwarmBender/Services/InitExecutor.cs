@@ -4,7 +4,7 @@ using SwarmBender.Services.Models;
 
 namespace SwarmBender.Services;
 
-/// <summary>Executes init scaffolding flow.</summary>
+/// <summary>Executes init scaffolding flow (overlay-based v3).</summary>
 public sealed class InitExecutor : IInitExecutor
 {
     private readonly IFileSystem _fs;
@@ -51,18 +51,18 @@ public sealed class InitExecutor : IInitExecutor
     {
         var (c, s) = (0, 0);
 
-        // roots
+        // Root folders
         var r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "stacks"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "stacks", "all"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "services"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "metadata"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops"), dry, quiet, ct); Tally(r1, ref c, ref s);
 
-        // metadata
+        // Metadata
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "metadata", "groups.yml"), _stub.GroupsYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "metadata", "tenants.yml"), _stub.TenantsYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
 
-        // ops
+        // Ops
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "policies"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "guardrails.yml"), _stub.GuardrailsYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "labels.yml"), _stub.LabelsPolicyYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
@@ -75,36 +75,33 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "state", "last"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "state", "history"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "reports", "preflight"), dry, quiet, ct); Tally(r1, ref c, ref s);
-        r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "reports", "diffs"), dry, quiet, ct); Tally(r1, ref c, ref s);
 
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "ci-templates"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "ci-templates", "github-actions.yml"), _stub.GitHubActionsYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "ci-templates", "azure-pipelines.yml"), _stub.AzurePipelinesYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
 
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "vars"), dry, quiet, ct); Tally(r1, ref c, ref s);
+        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "vars", "secrets-provider.yml"), _stub.SecretsProviderYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
 
-        // global env definitions (overlay-aware)
+        // Global allowlist for process env (optional)
+        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "stacks", "all", "use-envvars.json"), _stub.UseEnvVarsDefaultJson, dry, quiet, ct); Tally(r1, ref c, ref s);
+
         if (!noGlobalDefs)
         {
             foreach (var env in envs)
             {
-                var envBase = Path.Combine(root, "stacks", "all", env);
-                var envDir  = Path.Combine(envBase, "env");
-                var stackDir= Path.Combine(envBase, "stack");
+                // stacks/all/<env>/env with appsettings & defaults
+                var basePath = Path.Combine(root, "stacks", "all", env);
+                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "env"), dry, quiet, ct); Tally(r1, ref c, ref s);
+                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "default.json"), _stub.EnvDefaultJson(env), dry, quiet, ct); Tally(r1, ref c, ref s);
+                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "env", "appsettings.json"), "{}", dry, quiet, ct); Tally(r1, ref c, ref s);
 
-                r1 = await _fs.EnsureDirectoryAsync(envDir,  dry, quiet, ct); Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureDirectoryAsync(stackDir, dry, quiet, ct); Tally(r1, ref c, ref s);
+                // stacks/all/<env>/stack overlays
+                r1 = await _fs.EnsureDirectoryAsync(Path.Combine(basePath, "stack"), dry, quiet, ct); Tally(r1, ref c, ref s);
+                r1 = await _fs.EnsureFileAsync(Path.Combine(basePath, "stack", "global.yml"), _stub.GlobalStackOverlayYaml(env), dry, quiet, ct); Tally(r1, ref c, ref s);
 
-                // env JSON stubs
-                r1 = await _fs.EnsureFileAsync(Path.Combine(envDir, "default.json"), _stub.EnvDefaultJson(env), dry, quiet, ct); Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(envDir, "appsettings.json"), "{}", dry, quiet, ct); Tally(r1, ref c, ref s);
-                // allow-list for pipeline env vars (empty by default)
-                r1 = await _fs.EnsureFileAsync(Path.Combine(envDir, "use-envvars.json"), "[]", dry, quiet, ct); Tally(r1, ref c, ref s);
-
-                // optional global overlay starter
-                r1 = await _fs.EnsureFileAsync(Path.Combine(stackDir, "global.yml"),
-                    "# Global overlays for this environment (merged first). Put labels/deploy/logging/mounts here.\n", dry, quiet, ct);
-                Tally(r1, ref c, ref s);
+                // empty secrets map for this env (optional but helpful)
+                r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "vars", $"secrets-map.{env}.yml"), _stub.SecretsMapYaml(env), dry, quiet, ct); Tally(r1, ref c, ref s);
             }
         }
 
@@ -123,34 +120,35 @@ public sealed class InitExecutor : IInitExecutor
         var r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "stacks"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureDirectoryAsync(stackRoot, dry, quiet, ct); Tally(r1, ref c, ref s);
 
-        // template + optional top-level defs
+        // Template
         r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "docker-stack.template.yml"), _stub.StackTemplateYaml, dry, quiet, ct); Tally(r1, ref c, ref s);
 
+        // Optional top-level defs (empty accepted, render bubbles external from services)
         if (!noDefs)
         {
             r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "secrets.yml"), _stub.StackSecretsStub, dry, quiet, ct); Tally(r1, ref c, ref s);
             r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "configs.yml"), _stub.StackConfigsStub, dry, quiet, ct); Tally(r1, ref c, ref s);
         }
 
+        // Optional aliases
         if (!noAliases)
         {
             r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "aliases.yml"), _stub.AliasesStub, dry, quiet, ct); Tally(r1, ref c, ref s);
         }
 
-        // per-env overlay folders for this stack
-        if (envs.Count > 0)
+        // Stack-level allowlist for process env (optional)
+        r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "use-envvars.json"), _stub.UseEnvVarsDefaultJson, dry, quiet, ct); Tally(r1, ref c, ref s);
+
+        // Per-environment stack overlays
+        foreach (var env in envs)
         {
-            foreach (var env in envs)
-            {
-                var envStackDir = Path.Combine(stackRoot, env, "stack");
-                r1 = await _fs.EnsureDirectoryAsync(envStackDir, dry, quiet, ct); Tally(r1, ref c, ref s);
-                r1 = await _fs.EnsureFileAsync(Path.Combine(envStackDir, "overrides.yml"),
-                    $"# Overlays for stack '{stackId}' on environment '{env}'.\n# These are merged after stacks/all/{env}/stack/*.yml\n", dry, quiet, ct);
-                Tally(r1, ref c, ref s);
-            }
+            var envRoot = Path.Combine(stackRoot, env);
+            r1 = await _fs.EnsureDirectoryAsync(envRoot, dry, quiet, ct); Tally(r1, ref c, ref s);
+            r1 = await _fs.EnsureDirectoryAsync(Path.Combine(envRoot, "stack"), dry, quiet, ct); Tally(r1, ref c, ref s);
+            r1 = await _fs.EnsureFileAsync(Path.Combine(envRoot, "stack", "00-stack.yml"), _stub.StackEnvOverlayYaml(stackId, env), dry, quiet, ct); Tally(r1, ref c, ref s);
         }
 
-        // ops boilerplate (if missing)
+        // Ops base
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops"), dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "README.md"), _stub.OpsReadme, dry, quiet, ct); Tally(r1, ref c, ref s);
         r1 = await _fs.AppendGitignoreAsync(root, _stub.GitignoreLines, dry, quiet, ct); Tally(r1, ref c, ref s);

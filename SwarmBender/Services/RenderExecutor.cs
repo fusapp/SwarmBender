@@ -13,24 +13,21 @@ using SwarmBender.Services.Models;
 namespace SwarmBender.Services;
 
 /// <summary>
-/// Renderer v1.6
+/// Renderer v1.7
 /// - Layered composition (template + stacks/all + services/<svc>)
 /// - appsettings*.json: env (flatten) | config (swarm config + mount)
 /// - ${VAR} token interpolation (keys & string values)
-/// - Process ENV with allowlist (use-envvars.json):
-///     * Keys from files (JSON/appsettings) are protected (file wins)
-///     * Template keys may be overridden by process env
-///     * New keys are added only if present in use-envvars.json
-/// - Special ${ENVVARS} -> space-joined "KEY=VALUE" of final service env (after allowlist & precedence)
-/// - Healthcheck test forced to flow sequence: ["CMD", "curl", ...]
-/// - NEW: environment written as block sequence of "KEY=VALUE" items
-///         (preserves template order first, then appends others alphabetically)
+/// - Process ENV with allowlist (use-envvars.json)
+/// - Special ${ENVVARS}
+/// - Healthcheck.test -> flow sequence
+/// - Environment -> block sequence of "KEY=VALUE" (template order first)
+/// - NEW: Labels -> block sequence of "key=value" (template order first, then alphabetic)
 /// </summary>
 public sealed class RenderExecutor : IRenderExecutor
 {
     private static readonly ISerializer YamlWriter = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
-        .WithTypeConverter(new FlowSeqYamlConverter()) // for healthcheck.test flow style
+        .WithTypeConverter(new FlowSeqYamlConverter()) // healthcheck.test flow array
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -137,6 +134,18 @@ public sealed class RenderExecutor : IRenderExecutor
         // --- capture template env order (if any) before normalization ---
         var templateEnvOrder = ExtractEnvKeyOrderFromNode(templateSvc.TryGetValue("environment", out var rawEnvNode) ? rawEnvNode : null);
 
+        // --- capture template labels preferred order (service + deploy.labels) ---
+        var templateLabelsOrder = new List<string>();
+        var rawLabelsNode = templateSvc.TryGetValue("labels", out var labelsNode) ? labelsNode : null;
+        templateLabelsOrder.AddRange(ExtractLabelOrderFromNode(rawLabelsNode));
+        if (templateSvc.TryGetValue("deploy", out var deployNode0) && deployNode0 is IDictionary<string, object?> dep0 &&
+            dep0.TryGetValue("labels", out var depLabelsNode0))
+        {
+            foreach (var k in ExtractLabelOrderFromNode(depLabelsNode0))
+                if (!templateLabelsOrder.Contains(k, StringComparer.OrdinalIgnoreCase))
+                    templateLabelsOrder.Add(k);
+        }
+
         // Track keys sourced from files (JSON/appsettings) -> file wins over process env
         var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -178,7 +187,7 @@ public sealed class RenderExecutor : IRenderExecutor
         }
 
         // --- LABELS (normalize deploy.labels -> service.labels) ---
-        var labelDict = MergeHelpers.NormalizeLabels(svc.TryGetValue("labels", out var labelsNode) ? labelsNode : null);
+        var labelDict = MergeHelpers.NormalizeLabels(svc.TryGetValue("labels", out var labelsNode2) ? labelsNode2 : null);
 
         if (svc.TryGetValue("deploy", out var deployNode) && deployNode is IDictionary<string, object?> deployMap &&
             deployMap.TryGetValue("labels", out var depLabelsNode))
@@ -191,8 +200,11 @@ public sealed class RenderExecutor : IRenderExecutor
         await MergeYamlLabelDirAsync(Path.Combine(root, "stacks", "all", env, "labels"), labelDict, ct);
         await MergeYamlLabelDirAsync(Path.Combine(root, "services", canonicalService, "labels", env), labelDict, ct);
 
+        // >>> Write labels as sequence of "key=value" (template order first)
         if (labelDict.Count > 0)
-            svc["labels"] = MergeHelpers.LabelsToYaml(labelDict);
+            svc["labels"] = BuildLabelsSequence(labelDict, templateLabelsOrder);
+        else
+            svc.Remove("labels");
 
         // --- DEPLOY ---
         var deploy2 = svc.TryGetValue("deploy", out var d) && d is IDictionary<string, object?> dm ? new Dictionary<string, object?>(dm, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -213,10 +225,7 @@ public sealed class RenderExecutor : IRenderExecutor
         ProjectMountsToService(mounts, svc);
 
         // ---- Token interpolation vars ----
-        // Base: current envVars (after allowlist & precedence)
         var tokenVars = new Dictionary<string, string>(envVars, StringComparer.OrdinalIgnoreCase);
-
-        // Fallback with process env for missing tokens
         foreach (var kv in processEnv)
             if (!tokenVars.ContainsKey(kv.Key))
                 tokenVars[kv.Key] = kv.Value ?? string.Empty;
@@ -227,7 +236,7 @@ public sealed class RenderExecutor : IRenderExecutor
         // Put env as sequence of "KEY=VALUE" (preserve template order first)
         svc["environment"] = BuildEnvironmentSequence(envVars, templateEnvOrder);
 
-        // Expand tokens across the service map (including environment list items)
+        // Expand tokens across the service map (including environment & labels list items)
         var svcExpanded = ExpandMapTokens(svc, tokenVars);
         return svcExpanded;
     }
@@ -261,8 +270,8 @@ public sealed class RenderExecutor : IRenderExecutor
     private static IList<object?> BuildEnvironmentSequence(IDictionary<string, string> envVars, IList<string>? preferredOrder)
     {
         var result = new List<object?>();
-
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         if (preferredOrder is not null)
         {
             foreach (var k in preferredOrder)
@@ -284,9 +293,60 @@ public sealed class RenderExecutor : IRenderExecutor
         return result;
     }
 
+    // ---- labels helpers ----
+
+    private static IEnumerable<string> ExtractLabelOrderFromNode(object? labelsNode)
+    {
+        if (labelsNode is null) yield break;
+
+        if (labelsNode is IEnumerable<object?> list)
+        {
+            foreach (var item in list)
+            {
+                var s = item?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(s)) continue;
+                var idx = s.IndexOf('=');
+                var key = idx >= 0 ? s[..idx] : s;
+                if (!string.IsNullOrWhiteSpace(key))
+                    yield return key;
+            }
+        }
+        else if (labelsNode is IDictionary<string, object?> map)
+        {
+            foreach (var k in map.Keys)
+                if (!string.IsNullOrWhiteSpace(k))
+                    yield return k;
+        }
+    }
+
+    private static IList<object?> BuildLabelsSequence(IDictionary<string, string> labels, IList<string>? preferredOrder)
+    {
+        var result = new List<object?>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (preferredOrder is not null)
+        {
+            foreach (var k in preferredOrder)
+            {
+                if (labels.TryGetValue(k, out var v))
+                {
+                    result.Add($"{k}={v}");
+                    seen.Add(k);
+                }
+            }
+        }
+
+        foreach (var k in labels.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            if (seen.Contains(k)) continue;
+            result.Add($"{k}={labels[k]}");
+        }
+
+        return result;
+    }
+
     private static string BuildEnvVarsInline(IDictionary<string, string> tokenVars)
     {
-        // Deterministic order for reproducible renders
         var parts = tokenVars.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
                              .Select(kv => $"{kv.Key}={kv.Value}");
         return string.Join(' ', parts);

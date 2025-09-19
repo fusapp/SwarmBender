@@ -1,7 +1,9 @@
 namespace SwarmBender.Services.Abstractions;
 
-/// <summary>Prunes old versioned secrets based on retain policy.</summary>
 public interface ISecretsPruneService
 {
-    Task<int> PruneAsync(string rootPath, string env, string scope, int retain, bool dryRun, bool quiet, CancellationToken ct = default);
+    Task<SecretsPruneResult> PruneAsync(SecretsPruneRequest request, CancellationToken ct = default);
 }
+
+public sealed record SecretsPruneRequest(string? Scope, string? Environment, int KeepLatest = 2, bool DryRun = false, string? ReportPath = null);
+public sealed record SecretsPruneResult(IReadOnlyList<string> Kept, IReadOnlyList<string> Removed, bool DryRun);

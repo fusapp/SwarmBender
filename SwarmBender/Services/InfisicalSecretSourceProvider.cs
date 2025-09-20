@@ -1,275 +1,223 @@
+// File: SwarmBender/Services/InfisicalSecretSourceProvider.cs
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using SwarmBender.Services.Abstractions;
 
 namespace SwarmBender.Services;
 
-/// <summary>
-/// Secret values provider backed by Infisical.
-/// - Config:  ops/vars/providers/infisical.yml
-/// - Inputs:  ops/vars/secrets-map.{env}.yml  (flattened keys as candidates)
-/// - Output:  Dictionary{flattenKey -> value} (only keys found in Infisical)
-///
-/// Auth: Service Token (recommended). Token kaynağı:
-///   - env var (default: INFISICAL_TOKEN), veya
-///   - ops/vars/providers/infisical.yml içindeki tokenEnvVar ile adını belirtebilirsin.
-///
-/// Not: Endpoint varsayılanı Infisical v3 raw secrets içindir:
-///   POST {baseUrl}/api/v3/secrets/raw
-///   Body: { environment, workspaceId (projectId), secretPath, expandSecretReferences }
-/// Dönen yanıtta "secrets": [ { "key": "...", "value": "..." }, ... ] beklenir.
-/// </summary>
 public sealed class InfisicalSecretSourceProvider : ISecretSourceProvider
 {
     public string Type => "infisical";
 
-    private static readonly HttpClient Http = new()
-    {
-        Timeout = TimeSpan.FromSeconds(30)
-    };
-
     private readonly IYamlLoader _yaml;
-
     public InfisicalSecretSourceProvider(IYamlLoader yaml) => _yaml = yaml;
 
-    public async Task<IDictionary<string, string>> GetAsync(
-        string rootPath,
-        string scope,   // e.g., "global"
-        string env,
-        CancellationToken ct = default)
+    public async Task<IDictionary<string, string>> GetAsync(string rootPath, string scope, string env, CancellationToken ct = default)
     {
-        var cfg = await LoadConfigAsync(rootPath, ct);
-        if (cfg is null) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var cfg = await LoadConfigAsync(rootPath, ct)
+                  ?? throw new InvalidOperationException("Infisical config not found at ops/vars/providers/infisical.yml");
 
         var token = ResolveToken(cfg);
-        if (string.IsNullOrWhiteSpace(token)) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(token))
+            throw new InvalidOperationException($"Infisical token not found. Set env var '{cfg.TokenEnvVar ?? "INFISICAL_TOKEN"}'.");
 
-        var infEnv = cfg.EnvMap.TryGetValue(env, out var mappedEnv) && !string.IsNullOrWhiteSpace(mappedEnv)
-            ? mappedEnv!
-            : env;
+        var envSlug   = MapEnv(cfg, env);
+        var baseUrl   = (cfg.BaseUrl?.TrimEnd('/')) ?? "https://app.infisical.com";
+        var endpoint  = string.IsNullOrWhiteSpace(cfg.DownloadEndpoint) ? "api/v3/secrets/raw" : cfg.DownloadEndpoint!.TrimStart('/');
+        var url       = $"{baseUrl}/{endpoint}";
 
-        var pathRendered = (cfg.PathTemplate ?? "/")
-            .Replace("{env}", infEnv, StringComparison.Ordinal)
-            .Replace("{scope}", scope ?? string.Empty, StringComparison.Ordinal);
+        // hedef path (örn: "/sso"), yoksa "/"’a fallback
+        var pathTpl   = string.IsNullOrWhiteSpace(cfg.PathTemplate) ? "/" : cfg.PathTemplate!;
+        var secretPath = pathTpl.Replace("{env}", envSlug, StringComparison.Ordinal)
+                                .Replace("{scope}", string.IsNullOrWhiteSpace(scope) ? "global" : scope, StringComparison.Ordinal);
 
-        // 1) Aday flattened key’ler (secrets-map.<env>.yml anahtarları)
-        var candidates = await LoadCandidateKeysAsync(rootPath, env, ct);
-        if (candidates.Count == 0) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 1. deneme: belirtilen path
+        var list = await FetchAsync(url, token, cfg, envSlug, secretPath, ct);
 
-        // 2) Infisical’dan path altındaki tüm secret’ları çek
-        var baseUrl = (cfg.BaseUrl?.TrimEnd('/')) ?? "https://app.infisical.com";
-        var endpoint = (cfg.Endpoint?.TrimStart('/')) ?? "api/v3/secrets/raw";
+        // path bulunamadıysa fallback "/"
+        if (list is null)
+            list = await FetchAsync(url, token, cfg, envSlug, "/", ct) ?? new List<(string Key, string Value)>();
 
-        var requestUri = $"{baseUrl}/{endpoint}";
-        var reqObj = new
-        {
-            environment = infEnv,
-            workspaceId = cfg.ProjectId,
-            secretPath = pathRendered,
-            expandSecretReferences = true
-        };
-
-        using var reqMsg = new HttpRequestMessage(HttpMethod.Post, requestUri)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(reqObj), Encoding.UTF8, "application/json")
-        };
-        reqMsg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        using var resp = await Http.SendAsync(reqMsg, ct);
-        if (!resp.IsSuccessStatusCode)
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        var stream = await resp.Content.ReadAsStreamAsync(ct);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-
-        // Esnek parse: "secrets": [ {key,value}... ]
-        var infDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (doc.RootElement.TryGetProperty("secrets", out var secretsNode) &&
-            secretsNode.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var el in secretsNode.EnumerateArray())
-            {
-                var key = el.TryGetProperty("key", out var k) ? k.GetString() : null;
-                var val = el.TryGetProperty("value", out var v) ? v.GetString() : null;
-                if (!string.IsNullOrWhiteSpace(key) && val is not null)
-                    infDict[key!] = val!;
-            }
-        }
-
-        // 3) Aday flattened key’leri include filtresinden geçir, ad çöz ve değer eşle
+        // Flatten forma geri çevir (ConnectionStrings_Mongo_SSO -> ConnectionStrings__Mongo_SSO)
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var flatKey in candidates)
-        {
-            if (!IsIncluded(cfg, flatKey)) continue;
+        // Doğrudan map’in tersi (yüksek öncelik)
+        var reverseMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in cfg.Map) // Map: FlatKey -> InfKey (upload sırasında)
+            if (!string.IsNullOrWhiteSpace(kv.Value))
+                reverseMap[kv.Value] = kv.Key;
 
-            var infKey = ResolveInfisicalKey(cfg, flatKey);
-            if (infDict.TryGetValue(infKey, out var value))
-                result[flatKey] = value;
+        foreach (var (infKey, val) in list)
+        {
+            string flatKey;
+
+            if (reverseMap.TryGetValue(infKey, out var mappedBack))
+            {
+                flatKey = mappedBack; // explicit eşleme kazanır
+            }
+            else
+            {
+                // Template tersine çevirme (KeyTemplate = "{key}" olduğu sürece no-op)
+                var k = infKey;
+
+                // replace’i tersine uygula: upload’da "__" -> "_" yaptıysak, download’da "_" -> "__"
+                foreach (var kv in cfg.Replace)
+                {
+                    var from = kv.Key ?? string.Empty;
+                    var to   = kv.Value ?? string.Empty;
+                    if (to.Length > 0)
+                        k = k.Replace(to, from, StringComparison.Ordinal);
+                }
+
+                // stripPrefix’in tam tersi normalde bilinmez (tek yönlüdür); bizde {key} olduğu için dokunmuyoruz.
+                flatKey = k;
+            }
+
+            result[flatKey] = val ?? string.Empty;
         }
 
         return result;
     }
 
-    // ---------- helpers ----------
-
-    private static bool IsIncluded(AkvLikeIncludeMap cfg, string flatKey)
+    // --- HTTP GET (v3 raw). 404 -> null, başarı -> secrets listesi.
+    private static async Task<List<(string Key, string Value)>?> FetchAsync(
+        string url, string token, InfCfg cfg, string envSlug, string secretPath, CancellationToken ct)
     {
-        if (cfg.Include.Count == 0) return true;
-        foreach (var pat in cfg.Include)
-            if (WildcardMatch(flatKey, pat)) return true;
-        return false;
-    }
+        var ws = cfg.WorkspaceId ?? cfg.ProjectId ?? cfg.ProjectSlug;
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
-    private static bool WildcardMatch(string text, string pattern)
-    {
-        if (string.IsNullOrEmpty(pattern)) return text == pattern;
-        var parts = pattern.Split('*');
-        if (parts.Length == 1) return string.Equals(text, pattern, StringComparison.OrdinalIgnoreCase);
-
-        var idx = 0; var first = true;
-        foreach (var part in parts)
+        var query = new Dictionary<string, string?>
         {
-            if (part.Length == 0) { first = false; continue; }
-            var found = text.IndexOf(part, idx, StringComparison.OrdinalIgnoreCase);
-            if (found < 0) return false;
-            if (first && !pattern.StartsWith("*") && found != 0) return false;
-            idx = found + part.Length; first = false;
+            ["workspaceId"] = ws,
+            ["projectId"]   = cfg.ProjectId ?? cfg.ProjectSlug ?? ws,
+            ["environment"] = envSlug,
+            ["secretPath"]  = secretPath,
+            ["expandSecretReferences"] = "true",
+            ["include_imports"]        = "true"
+        };
+
+        var reqUrl = AppendQuery(url, query);
+        using var req = new HttpRequestMessage(HttpMethod.Get, reqUrl);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var resp = await http.SendAsync(req, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return null; // fallback'e izin ver
+
+        if (!resp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Infisical fetch failed ({(int)resp.StatusCode}): {body}");
+
+        // response şekilleri farklı olabilir:
+        // { "secrets":[ {"secretKey":"K","secretValue":"V"}, ... ] }
+        // veya { "secrets":[ {"key":"K","value":"V"}, ... ] }
+        var list = new List<(string Key, string Value)>();
+
+        using var doc = JsonDocument.Parse(body);
+        if (doc.RootElement.TryGetProperty("secrets", out var secrets) && secrets.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in secrets.EnumerateArray())
+            {
+                string? k = null, v = null;
+                if (el.TryGetProperty("secretKey", out var sk) && sk.ValueKind == JsonValueKind.String) k = sk.GetString();
+                if (el.TryGetProperty("secretValue", out var sv) && sv.ValueKind == JsonValueKind.String) v = sv.GetString();
+
+                if (k is null && el.TryGetProperty("key", out var k2) && k2.ValueKind == JsonValueKind.String) k = k2.GetString();
+                if (v is null && el.TryGetProperty("value", out var v2) && v2.ValueKind == JsonValueKind.String) v = v2.GetString();
+
+                if (!string.IsNullOrWhiteSpace(k))
+                    list.Add((k!, v ?? string.Empty));
+            }
         }
-        return pattern.EndsWith("*") || idx == text.Length;
+
+        return list;
     }
 
-    private static string ResolveInfisicalKey(InfisicalConfig cfg, string flatKey)
+    private static string AppendQuery(string baseUrl, IDictionary<string, string?> q)
     {
-        // explicit map wins
-        if (cfg.Map.TryGetValue(flatKey, out var mapped) && !string.IsNullOrWhiteSpace(mapped))
-            return mapped!;
-
-        var k = flatKey;
-
-        if (!string.IsNullOrWhiteSpace(cfg.StripPrefix) && k.StartsWith(cfg.StripPrefix, StringComparison.Ordinal))
-            k = k.Substring(cfg.StripPrefix.Length);
-
-        foreach (var kv in cfg.Replace)
-            k = k.Replace(kv.Key, kv.Value, StringComparison.Ordinal);
-
-        // template: {key}
-        var template = string.IsNullOrWhiteSpace(cfg.KeyTemplate) ? "{key}" : cfg.KeyTemplate!;
-        return template.Replace("{key}", k, StringComparison.Ordinal);
+        var first = true;
+        var sb = new System.Text.StringBuilder(baseUrl);
+        foreach (var kv in q)
+        {
+            if (string.IsNullOrWhiteSpace(kv.Value)) continue;
+            sb.Append(first ? '?' : '&');
+            first = false;
+            sb.Append(Uri.EscapeDataString(kv.Key));
+            sb.Append('=');
+            sb.Append(Uri.EscapeDataString(kv.Value!));
+        }
+        return sb.ToString();
     }
 
-    private async Task<List<string>> LoadCandidateKeysAsync(string rootPath, string env, CancellationToken ct)
+    // ---- config & helpers ----
+    private sealed class InfCfg
     {
-        var path = Path.Combine(rootPath, "ops", "vars", $"secrets-map.{env}.yml");
-        if (!File.Exists(path)) return new List<string>();
-        var yaml = await _yaml.LoadYamlAsync(path, ct);
-        return yaml.Keys.ToList(); // flatten keys
+        public string? BaseUrl { get; init; }
+        public string? DownloadEndpoint { get; init; }
+        public string? ProjectId { get; init; }
+        public string? ProjectSlug { get; init; }
+        public string? WorkspaceId { get; init; }
+        public string? PathTemplate { get; init; }
+        public string? TokenEnvVar { get; init; }
+        public string? Token { get; init; }
+
+        public string? StripPrefix { get; init; }
+        public Dictionary<string, string> Replace { get; } = new(StringComparer.Ordinal);
+        public string? KeyTemplate { get; init; }
+        public Dictionary<string, string> Map { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> EnvMap { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string? ResolveToken(InfisicalConfig cfg)
+    private async Task<InfCfg?> LoadConfigAsync(string rootPath, CancellationToken ct)
     {
+        var path = Path.Combine(rootPath, "ops", "vars", "providers", "infisical.yml");
+        if (!File.Exists(path)) return null;
+        var map = await _yaml.LoadYamlAsync(path, ct);
+
+        string? S(string k) => map.TryGetValue(k, out var v) ? v?.ToString() : null;
+
+        var cfg = new InfCfg
+        {
+            BaseUrl         = S("baseUrl") ?? "https://app.infisical.com",
+            DownloadEndpoint= S("downloadEndpoint") ?? S("endpoint") ?? "api/v3/secrets/raw",
+            ProjectId       = S("projectId"),
+            ProjectSlug     = S("projectSlug"),
+            WorkspaceId     = S("workspaceId"),
+            PathTemplate    = S("path") ?? "/",
+            TokenEnvVar     = S("tokenEnvVar") ?? "INFISICAL_TOKEN",
+            Token           = S("token"),
+            StripPrefix     = S("stripPrefix"),
+            KeyTemplate     = S("keyTemplate") ?? "{key}",
+        };
+
+        if (map.TryGetValue("replace", out var repl) && repl is IDictionary<string, object?> replMap)
+            foreach (var kv in replMap)
+                cfg.Replace[kv.Key] = kv.Value?.ToString() ?? string.Empty;
+
+        if (map.TryGetValue("map", out var m) && m is IDictionary<string, object?> mMap)
+            foreach (var kv in mMap)
+                if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value?.ToString() is { } v && !string.IsNullOrWhiteSpace(v))
+                    cfg.Map[kv.Key] = v;
+
+        if (map.TryGetValue("envMap", out var em) && em is IDictionary<string, object?> emMap)
+            foreach (var kv in emMap)
+                if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value?.ToString() is { } v2 && !string.IsNullOrWhiteSpace(v2))
+                    cfg.EnvMap[kv.Key] = v2;
+
+        return cfg;
+    }
+
+    private static string? ResolveToken(InfCfg cfg)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.Token)) return cfg.Token;
         var envName = string.IsNullOrWhiteSpace(cfg.TokenEnvVar) ? "INFISICAL_TOKEN" : cfg.TokenEnvVar!;
         var token = Environment.GetEnvironmentVariable(envName);
         return string.IsNullOrWhiteSpace(token) ? null : token;
     }
 
-    private async Task<InfisicalConfig?> LoadConfigAsync(string rootPath, CancellationToken ct)
-    {
-        var path = Path.Combine(rootPath, "ops", "vars", "providers", "infisical.yml");
-        if (!File.Exists(path)) return null;
-
-        var map = await _yaml.LoadYamlAsync(path, ct);
-
-        var cfg = new InfisicalConfig
-        {
-            BaseUrl = GetString(map, "baseUrl") ?? "https://app.infisical.com",
-            Endpoint = GetString(map, "endpoint") ?? "api/v3/secrets/raw",
-            ProjectId = GetString(map, "projectId"), // workspaceId
-            PathTemplate = GetString(map, "path") ?? "/",
-            TokenEnvVar = GetString(map, "tokenEnvVar") ?? "INFISICAL_TOKEN",
-            StripPrefix = GetString(map, "stripPrefix"),
-            KeyTemplate = GetString(map, "keyTemplate") ?? "{key}"
-        };
-
-        // include: [ "ConnectionStrings__*", "Redis__*" ]
-        if (map.TryGetValue("include", out var includeNode) && includeNode is IEnumerable<object?> incList)
-        {
-            foreach (var item in incList)
-            {
-                var s = item?.ToString();
-                if (!string.IsNullOrWhiteSpace(s))
-                    cfg.Include.Add(s!);
-            }
-        }
-
-        // replace: { "__": "_", ":": "_" }
-        if (map.TryGetValue("replace", out var replNode) && replNode is IDictionary<string, object?> repl)
-        {
-            foreach (var kv in repl)
-            {
-                var from = kv.Key;
-                var to = kv.Value?.ToString() ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(from))
-                    cfg.Replace[from] = to;
-            }
-        }
-
-        // map: { "ConnectionStrings__MSSQL_Master": "MSSQL_Master" }
-        if (map.TryGetValue("map", out var mNode) && mNode is IDictionary<string, object?> m)
-        {
-            foreach (var kv in m)
-            {
-                var k = kv.Key;
-                var v = kv.Value?.ToString() ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(k) && !string.IsNullOrWhiteSpace(v))
-                    cfg.Map[k] = v;
-            }
-        }
-
-        // envMap:
-        //   prod: prod
-        //   dev: development
-        if (map.TryGetValue("envMap", out var envNode) && envNode is IDictionary<string, object?> envMap)
-        {
-            foreach (var kv in envMap)
-            {
-                var k = kv.Key;
-                var v = kv.Value?.ToString();
-                if (!string.IsNullOrWhiteSpace(k) && !string.IsNullOrWhiteSpace(v))
-                    cfg.EnvMap[k] = v!;
-            }
-        }
-
-        return cfg;
-    }
-
-    private static string? GetString(IDictionary<string, object?> map, string key)
-        => map.TryGetValue(key, out var obj) ? obj?.ToString() : null;
-
-    // ---- config types
-
-    private abstract class AkvLikeIncludeMap
-    {
-        public List<string> Include { get; } = new();
-        public Dictionary<string, string> Replace { get; } = new(StringComparer.Ordinal);
-    }
-
-    private sealed class InfisicalConfig : AkvLikeIncludeMap
-    {
-        public string? BaseUrl { get; init; }
-        public string? Endpoint { get; init; }
-        public string? ProjectId { get; init; }          // workspaceId
-        public string? PathTemplate { get; init; }       // default "/"
-        public string? TokenEnvVar { get; init; }        // default "INFISICAL_TOKEN"
-
-        // key transform
-        public string? StripPrefix { get; init; }        // e.g., "ConnectionStrings__"
-        public string? KeyTemplate { get; init; }        // e.g., "{key}"
-        public Dictionary<string, string> Map { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-        // env map (Swarm env -> Infisical environment)
-        public Dictionary<string, string> EnvMap { get; } = new(StringComparer.OrdinalIgnoreCase);
-    }
+    private static string MapEnv(InfCfg cfg, string env)
+        => (cfg.EnvMap.TryGetValue(env, out var mapped) && !string.IsNullOrWhiteSpace(mapped)) ? mapped! : env;
 }

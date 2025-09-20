@@ -39,6 +39,7 @@ app.Configure(cfg =>
        utils.AddBranch("infisical", inf =>
        {
           inf.AddCommand<InfisicalUploadCommand>("upload");
+          inf.AddCommand<InfisicalInitCommand>("init");
        });
     });
 });

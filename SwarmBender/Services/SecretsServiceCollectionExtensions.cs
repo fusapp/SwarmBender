@@ -20,6 +20,7 @@ public static class SecretsServiceCollectionExtensions
 
         // Engine (placeholder; implement Docker SDK adapter in the next step)
         services.AddSingleton<IDockerSecretClient, StubDockerSecretClient>();
+        services.AddSingleton<IInfisicalClient, InfisicalClient>();
 
         // Services
         services.AddSingleton<ISecretsSyncService, SecretsSyncService>();

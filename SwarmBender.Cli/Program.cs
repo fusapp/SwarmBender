@@ -3,6 +3,8 @@ using Spectre.Console.Cli;
 using SwarmBender.Cli.Infrastructure;
 using SwarmBender.Cli.Commands;
 using SwarmBender.Cli.Commands.Secrets;
+using SwarmBender.Cli.Commands.Utils;
+using SwarmBender.Cli.Commands.Utils.Infisical;
 using SwarmBender.Services;
 using SwarmBender.Services.Abstractions;
 
@@ -31,6 +33,14 @@ app.Configure(cfg =>
     cfg.AddCommand<RenderCommand>("render")
        .WithDescription("Render final stack.yml for one or more environments.");
     cfg.AddSecretsCommands();
+    cfg.AddBranch("utils", utils =>
+    {
+       utils.AddCommand<UtilsCommand>("utils");
+       utils.AddBranch("infisical", inf =>
+       {
+          inf.AddCommand<InfisicalUploadCommand>("upload");
+       });
+    });
 });
 
 return app.Run(args);

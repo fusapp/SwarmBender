@@ -4,18 +4,53 @@
         <TargetFramework>net9.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+
+        <!-- CLI -->
         <AssemblyName>sb</AssemblyName>
         <Company>swarmbender</Company>
 
+        <!-- Pack as .NET global tool -->
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>sb</ToolCommandName>
+
+        <!-- NuGet package metadata (CI'da -p:Version ile override edebilirsin) -->
+        <IsPackable>true</IsPackable>
+        <PackageId>SwarmBender</PackageId>
+        <Version>0.0.0-dev</Version>
+        <Authors>fusapp</Authors>
+        <Product>SwarmBender</Product>
+        <Description>SwarmBender is a Docker Swarm stack renderer/validator with secrets lifecycle and provider integrations.</Description>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/fusapp/swarmbender</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageProjectUrl>https://fusapp.github.io/swarmbender/</PackageProjectUrl>
+
+        <!-- SourceLink / deterministic build -->
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <DebugType>portable</DebugType>
+        <Deterministic>true</Deterministic>
+        <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+
+        <!-- Symbols (opsiyonel ama faydalı) -->
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>
+
     <ItemGroup>
-        <ProjectReference Include="..\SwarmBender\SwarmBender.csproj"/>
+        <ProjectReference Include="..\SwarmBender\SwarmBender.csproj" />
     </ItemGroup>
+
     <ItemGroup>
-        <PackageReference Include="Spectre.Console" Version="0.51.1"/>
-        <PackageReference Include="Spectre.Console.Cli" Version="0.51.1"/>
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.9"/>
+        <PackageReference Include="Spectre.Console" Version="0.51.1" />
+        <PackageReference Include="Spectre.Console.Cli" Version="0.51.1" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.9" />
+        <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    </ItemGroup>
+
+    <!-- README'yi pakete ekle (repo kökünde varsayıldı) -->
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 </Project>

@@ -1,7 +1,9 @@
 title: SwarmBender
 description: A pragmatic CLI for Docker Swarm configuration, rendering, and secrets lifecycle.
-theme: minima
+theme: jekyll-theme-minimal
 logo: /assets/logo-swarmbender.svg
 github:
   is_project_page: true
   is_user_page: false
+plugins:
+  - jekyll-seo-tag

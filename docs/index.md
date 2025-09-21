@@ -1,28 +1,21 @@
+---
+layout: default
+title: SwarmBender
+---
+
 # SwarmBender
 
-SwarmBender is a cross-platform .NET global tool (`sb`) that renders, validates and operates Docker Swarm stacks with composable overlays and provider-backed secrets.
+A fast, batteries-included CLI to **render Docker Swarm stacks** and **manage secrets** across environments.
 
-## Quick install
+> Project site: `{{ site.url }}{{ site.baseurl }}`
+
+![SwarmBender Logo]({{ '/assets/logo.svg' | relative_url }})
+
+## Quick Install
+
 ```bash
-dotnet tool install -g SwarmBender
+dotnet tool install --global SwarmBender.Cli
 # or update
-dotnet tool update -g SwarmBender
-```
-
-## Quick start
-```bash
-# 1) init (root + optional stack)
-sb init --env dev,prod
-sb init sso --env dev,prod
-
-# 2) validate
-sb validate -e dev --details
-
-# 3) render
-sb render sso -e dev --out ops/state/last --preview
-```
-
-- Docs:
-  - [Usage](usage.md)
-  - [Secrets lifecycle](secrets.md)
-  - [Infisical provider](infisical.md)
+dotnet tool update --global SwarmBender.Cli
+# run
+sb -h

@@ -1,24 +1,6 @@
-# SwarmBender Solution
+# SwarmBender
 
-Two-project layout:
+Docs live under **/docs** and are published with GitHub Pages.
 
-- `SwarmBender/` — core library (services, abstractions, models)
-- `SwarmBender.Cli/` — CLI frontend, depends on core
-
-## Build
-
-```bash
-dotnet build SwarmBender.Cli -c Release
-```
-
-## Run
-
-```bash
-# init
-dotnet run --project SwarmBender.Cli -- init
-dotnet run --project SwarmBender.Cli -- init payments -e dev,prod
-
-# validate
-dotnet run --project SwarmBender.Cli -- validate
-dotnet run --project SwarmBender.Cli -- validate backoffice --out ops/reports/preflight/all.json
-```
+- Site: `https://<org>.github.io/SwarmBender/`
+- Local preview (optional): open `docs/index.md` directly or use a Jekyll preview if installed.

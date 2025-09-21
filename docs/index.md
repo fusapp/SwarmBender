@@ -1,21 +1,30 @@
 ---
-layout: default
 title: SwarmBender
 ---
 
 # SwarmBender
 
-A fast, batteries-included CLI to **render Docker Swarm stacks** and **manage secrets** across environments.
+**SwarmBender** is a pragmatic CLI to standardize and speed up Docker Swarm workflows:
 
-> Project site: `{{ site.url }}{{ site.baseurl }}`
+- Opinionated folder layout with `init`
+- Policy and schema checks with `validate`
+- Deterministic stack rendering with `render`
+- Secrets lifecycle (create, prune, audit) with `secrets`
+- Provider integrations (env/file/Infisical) and utilities
 
-![SwarmBender Logo]({{ '/assets/logo.svg' | relative_url }})
-
-## Quick Install
-
+> Install (as .NET global tool):
 ```bash
-dotnet tool install --global SwarmBender.Cli
-# or update
-dotnet tool update --global SwarmBender.Cli
-# run
+dotnet tool install --global SwarmBender.Cli --version <VERSION>
+# command name
 sb -h
+```
+
+## Quick Links
+- [Getting Started](getting-started.html)
+- [init](init.html)
+- [validate](validate.html)
+- [render](render.html)
+- [secrets](secrets.html)
+- [providers](providers.html)
+- [utils](utils.html)
+- [FAQ](faq.html)

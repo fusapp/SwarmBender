@@ -2,15 +2,11 @@ title: SwarmBender
 description: A CLI to compose, render and manage secrets for Docker Swarm.
 theme: jekyll-theme-minimal
 
-# Site URL & baseurl are important for project pages
 url: "https://fusapp.github.io"
 baseurl: "/SwarmBender"
 
-logo: /assets/logo.svg
+logo: /SwarmBender/assets/logo.svg
 show_downloads: false
 
-# Optional plugins (allowed on GitHub Pages)
 plugins:
   - jekyll-seo-tag
-
-# If you later want a custom nav or collections, we can extend here

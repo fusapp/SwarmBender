@@ -1,9 +1,9 @@
-name: Release (NuGet, no external actions)
+name: Release (NuGet)
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*'   # Örn: v0.2.0
   workflow_dispatch:
 
 permissions:
@@ -11,28 +11,23 @@ permissions:
   packages: write
 
 jobs:
-  pack-and-push:
+  pack-and-publish:
     runs-on: ubuntu-latest
-
     steps:
-      # No external actions: shallow checkout via git
       - name: Checkout
-        run: |
-          git init .
-          git remote add origin https://github.com/${{ github.repository }}.git
-          git fetch --depth=1 origin ${{ github.sha }}
-          git checkout --detach ${{ github.sha }}
+        uses: actions/checkout@v4
 
-      # Try to use preinstalled .NET (we avoid setup-dotnet action)
-      - name: Dotnet info
-        run: dotnet --info || true
+      - name: Setup .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
 
       - name: Extract version from tag
-        id: v
+        id: ver
+        shell: bash
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          if [ -z "$TAG" ]; then echo "No tag version found"; exit 1; fi
-          echo "version=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Restore
         run: dotnet restore
@@ -40,43 +35,24 @@ jobs:
       - name: Build
         run: dotnet build -c Release --no-restore
 
-      - name: Pack tool
-        run: |
-          dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj \
-            -c Release \
-            -p:Version=${{ steps.v.outputs.version }} \
-            -o ./nupkgs
+      - name: Pack CLI tool
+        run: dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release -o ./nupkgs /p:Version=${{ steps.ver.outputs.version }}
 
-      - name: Smoke test (local install)
-        shell: bash
+      - name: Smoke test (local tool install)
         run: |
           PKG=$(ls ./nupkgs/*.nupkg | head -n1)
-          echo "Testing: $PKG"
-          dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.v.outputs.version }}
-          export PATH="$PATH:$HOME/.dotnet/tools"
+          echo "Testing $PKG"
+          dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.ver.outputs.version }}
           sb -h
 
-      - name: Push to NuGet (skip if no key)
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "No NUGET_API_KEY; skipping NuGet push."
-            exit 0
-          fi
-          dotnet nuget push "./nupkgs/*.nupkg" \
-            --api-key "$NUGET_API_KEY" \
-            --source "https://api.nuget.org/v3/index.json" \
-            --skip-duplicate
+      - name: Push to NuGet
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate
 
-      - name: Create GitHub Release (skip if no token)
+      - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GITHUB_TOKEN" ]; then
-            echo "No GITHUB_TOKEN; skipping GitHub Release."
-            exit 0
-          fi
-          gh release create "v${{ steps.v.outputs.version }}" ./nupkgs/*.nupkg \
-            --title "SwarmBender v${{ steps.v.outputs.version }}" \
-            --notes "See CHANGELOG for details."
+          gh release create "v${{ steps.ver.outputs.version }}" ./nupkgs/*.nupkg \
+            --title "SwarmBender v${{ steps.ver.outputs.version }}" \
+            --notes "Automated release via CI."

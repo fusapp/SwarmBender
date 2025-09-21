@@ -3,7 +3,7 @@ name: Release (NuGet, no external actions)
 on:
   push:
     tags:
-      - 'v*.*.*'   # örn: v0.1.0
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -13,7 +13,6 @@ jobs:
   pack-and-push:
     runs-on: ubuntu-latest
     steps:
-      # Reposundan başka bir action kullanmadan checkout
       - name: Checkout (no external action)
         run: |
           git init .
@@ -21,7 +20,6 @@ jobs:
           git fetch --depth=1 origin ${{ github.sha }}
           git checkout --detach ${{ github.sha }}
 
-      # (İsteğe bağlı) Dotnet kurulu mu gör
       - name: Setup .NET 9
         run: dotnet --info || true
 
@@ -53,11 +51,15 @@ jobs:
           export PATH="$PATH:$HOME/.dotnet/tools"
           sb -h
 
-      - name: Push to NuGet
-        if: ${{ secrets.NUGET_API_KEY != '' }}
+      - name: Push to NuGet (skip if no key)
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "No NUGET_API_KEY; skipping NuGet push."
+            exit 0
+          fi
+
           dotnet nuget push "./nupkgs/*.nupkg" \
             --api-key "$NUGET_API_KEY" \
             --source "https://api.nuget.org/v3/index.json" \

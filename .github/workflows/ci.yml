@@ -1,18 +1,46 @@
-name: CI
+name: CI (Build & Validate)
 
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
   pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-      - run: dotnet restore
-      - run: dotnet build -c Release --no-restore
-      - run: dotnet test -c Release --no-build --verbosity normal
+          cache: true
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build -c Release --no-restore
+
+      - name: Run tests (if any)
+        shell: bash
+        run: |
+          set -e
+          TESTS=$(ls **/*.Tests.csproj 2>/dev/null || true)
+          if [ -n "$TESTS" ]; then
+            dotnet test -c Release --no-build --logger "trx;LogFileName=tests.trx"
+          else
+            echo "No test projects found, skipping."
+          fi

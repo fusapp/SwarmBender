@@ -12,11 +12,24 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure no Jekyll & basic index
+        run: |
+          mkdir -p docs
+          touch docs/.nojekyll
+          if [ ! -f docs/index.html ] && [ -f docs/index.md ]; then
+            # basit dönüştürme yoksa direkt index.md servis edilir (Pages md destekler),
+            # burada sadece garantiye almak için bir fallback koyuyoruz:
+            echo "<meta http-equiv='refresh' content='0; url=index.md'/>" > docs/index.html
+          fi
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

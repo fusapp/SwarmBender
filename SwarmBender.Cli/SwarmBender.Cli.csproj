@@ -5,35 +5,24 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
 
-        <!-- CLI -->
-        <AssemblyName>sb</AssemblyName>
-        <Company>swarmbender</Company>
-
-        <!-- Pack as .NET global tool -->
+        <!-- Tool -->
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>sb</ToolCommandName>
 
-        <!-- NuGet package metadata (CI'da -p:Version ile override edebilirsin) -->
-        <IsPackable>true</IsPackable>
+        <!-- NuGet metadata -->
         <PackageId>SwarmBender</PackageId>
-        <Version>0.0.0-dev</Version>
-        <Authors>fusapp</Authors>
+        <Version>0.1.0-beta.1</Version>
+        <Authors>Fusapp Dev Team</Authors>
+        <Company>Fusapp OU</Company>
         <Product>SwarmBender</Product>
-        <Description>SwarmBender is a Docker Swarm stack renderer/validator with secrets lifecycle and provider integrations.</Description>
+        <Description>SwarmBender: render/validate + secrets lifecycle (Swarm, Consul, Infisical, etc.) — CLI global tool 'sb'</Description>
+        <PackageTags>docker;swarm;compose;render;validate;secrets;gitops;consul;infisical</PackageTags>
+        <RepositoryUrl>https://github.com/fusapp/SwarmBender</RepositoryUrl>
+        <PackageProjectUrl>https://fusapp.github.io/SwarmBender/</PackageProjectUrl>
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <RepositoryUrl>https://github.com/fusapp/swarmbender</RepositoryUrl>
-        <RepositoryType>git</RepositoryType>
-        <PackageProjectUrl>https://fusapp.github.io/swarmbender/</PackageProjectUrl>
 
-        <!-- SourceLink / deterministic build -->
-        <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <EmbedUntrackedSources>true</EmbedUntrackedSources>
-        <DebugType>portable</DebugType>
-        <Deterministic>true</Deterministic>
-        <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
-
-        <!-- Symbols (opsiyonel ama faydalı) -->
+        <!-- Semboller opsiyonel -->
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>

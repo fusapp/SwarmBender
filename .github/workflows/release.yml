@@ -5,14 +5,21 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write   # GH Release oluşturmak için
+  packages: write
+
 jobs:
   pack-and-push:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+          cache: true
 
       - name: Extract version from tag
         id: v
@@ -26,12 +33,42 @@ jobs:
       - name: Build
         run: dotnet build -c Release --no-restore
 
-      - name: Pack (tool)
+      - name: Pack (dotnet tool)
         run: |
-          dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj             -c Release             -p:Version=${{ steps.v.outputs.version }}             -o ./nupkgs
+          dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj \
+            -c Release \
+            -p:Version=${{ steps.v.outputs.version }} \
+            -o ./nupkgs
+
+      - name: Smoke test (install tool from local nupkg)
+        shell: bash
+        run: |
+          PKG=$(ls ./nupkgs/*.nupkg | head -n1)
+          echo "Testing package: $PKG"
+          dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.v.outputs.version }} || exit 1
+          sb -h || exit 1
+
+      - name: Upload nupkg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: nupkgs
 
       - name: Push to NuGet
+        if: ${{ secrets.NUGET_API_KEY != '' }}
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          dotnet nuget push "./nupkgs/*.nupkg"             --api-key "$NUGET_API_KEY"             --source "https://api.nuget.org/v3/index.json"             --skip-duplicate
+          dotnet nuget push "./nupkgs/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source "https://api.nuget.org/v3/index.json" \
+            --skip-duplicate
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nupkgs/*.nupkg
+          tag_name: v${{ steps.v.outputs.version }}
+          name: SwarmBender v${{ steps.v.outputs.version }}
+          draft: false
+          prerelease: false

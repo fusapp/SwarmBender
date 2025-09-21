@@ -1,58 +1,49 @@
-name: Release (NuGet)
+name: build-and-pack
 
 on:
   push:
-    tags: ['v*']
-  workflow_dispatch:
-
-permissions:
-  contents: write
-  packages: write
-
-env:
-  DOTNET_NOLOGO: true
+    branches: [ "main" ]
+    tags:     [ "v*" ]   # v1.2.3 gibi
 
 jobs:
-  pack-and-publish:
+  pack:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # TAG’leri görebilsin
 
       - name: Setup .NET 9
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
 
-      - name: Extract version from tag
+      - name: Derive version
         id: ver
         shell: bash
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          ref_type="${GITHUB_REF_TYPE}"           # 'branch' veya 'tag'
+          ref_name="${GITHUB_REF_NAME}"           # örn: main veya v1.2.3
+          if [[ "$ref_type" == "tag" && "$ref_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?$ ]]; then
+            ver="${ref_name#v}"                   # v1.2.3 -> 1.2.3
+          else
+            ver="0.1.0-ci.${GITHUB_RUN_NUMBER}"   # örn: 0.1.0-ci.123
+          fi
+          echo "version=$ver"
+          echo "version=$ver" >> $GITHUB_OUTPUT
 
-      # Sadece CLI projesini restore/build et (library projeyi transitif alacak)
       - name: Restore (CLI)
         run: dotnet restore ./SwarmBender.Cli/SwarmBender.Cli.csproj
 
       - name: Build (CLI)
         run: dotnet build ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-restore
 
-      - name: Pack (CLI as tool)
+      - name: Pack (CLI)
         run: dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-build -o ./nupkgs /p:Version=${{ steps.ver.outputs.version }}
 
-      - name: Ensure NuGet API Key is present
-        shell: bash
-        run: |
-          if [ -z "${{ secrets.NUGET_API_KEY }}" ]; then
-            echo "::error::Missing NUGET_API_KEY secret. Add at Org/Repo secrets and grant access."
-            exit 1
-          fi
-
+      # (Opsiyonel) NuGet publish — yalnızca tag ile çalıştırmak istersen if ekleyebilirsin
       - name: Push to NuGet
-        run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: SwarmBender ${{ github.ref_name }}
-          files: nupkgs/*.nupkg
+        if: startsWith(github.ref, 'refs/tags/v') && secrets.NUGET_API_KEY != ''
+        run: dotnet nuget push ./nupkgs/*.nupkg --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

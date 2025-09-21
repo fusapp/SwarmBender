@@ -3,7 +3,7 @@ name: Release (NuGet, no external actions)
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*'   # örn: v0.1.0
 
 permissions:
   contents: write
@@ -13,6 +13,7 @@ jobs:
   pack-and-push:
     runs-on: ubuntu-latest
     steps:
+      # Reposundan başka bir action kullanmadan checkout
       - name: Checkout (no external action)
         run: |
           git init .
@@ -20,6 +21,7 @@ jobs:
           git fetch --depth=1 origin ${{ github.sha }}
           git checkout --detach ${{ github.sha }}
 
+      # (İsteğe bağlı) Dotnet kurulu mu gör
       - name: Setup .NET 9
         run: dotnet --info || true
 
@@ -48,6 +50,7 @@ jobs:
           PKG=$(ls ./nupkgs/*.nupkg | head -n1)
           echo "Testing: $PKG"
           dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.v.outputs.version }}
+          export PATH="$PATH:$HOME/.dotnet/tools"
           sb -h
 
       - name: Push to NuGet

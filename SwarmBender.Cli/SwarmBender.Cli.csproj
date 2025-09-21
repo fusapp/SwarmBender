@@ -15,7 +15,7 @@
         <Authors>Fusapp Dev Team</Authors>
         <Company>Fusapp OU</Company>
         <Product>SwarmBender</Product>
-        <Description>SwarmBender: render/validate + secrets lifecycle (Swarm, Consul, Infisical, etc.) — CLI global tool 'sb'</Description>
+        <Description>SwarmBender: opinionated Docker Swarm stack builder (init/validate/render + secrets lifecycle).</Description>
         <PackageTags>docker;swarm;compose;render;validate;secrets;gitops;consul;infisical</PackageTags>
         <RepositoryUrl>https://github.com/fusapp/SwarmBender</RepositoryUrl>
         <PackageProjectUrl>https://fusapp.github.io/SwarmBender/</PackageProjectUrl>

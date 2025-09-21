@@ -1,0 +1,24 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender", "SwarmBender\SwarmBender.csproj", "{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Cli", "SwarmBender.Cli\SwarmBender.Cli.csproj", "{65F0A6B7-95F6-4639-A780-69FFFD2201DA}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+	EndGlobalSection
+EndGlobal

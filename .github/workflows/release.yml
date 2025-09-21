@@ -2,12 +2,11 @@ name: Release (NuGet)
 
 on:
   push:
-    tags:
-      - 'v*'             # v0.1.0 gibi tag pushta tetikler
-  workflow_dispatch:      # manuel tetikleme
+    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
-  contents: write         # release oluşturmak için
+  contents: write
   packages: write
 
 env:
@@ -16,7 +15,6 @@ env:
 jobs:
   pack-and-publish:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,34 +24,32 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      # (İsteğe bağlı) Çözüm dosyan varsa bunu kullan; yoksa restore/build adımlarını projelere göre düzenle
-      - name: Restore
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build -c Release --no-restore
-
       - name: Extract version from tag
         id: ver
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Pack CLI tool
-        run: dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release -o ./nupkgs /p:Version=${{ steps.ver.outputs.version }}
+      # Sadece CLI projesini restore/build et (library projeyi transitif alacak)
+      - name: Restore (CLI)
+        run: dotnet restore ./SwarmBender.Cli/SwarmBender.Cli.csproj
 
-      # Guard: NUGET_API_KEY gerçekten var mı (Org secret da olabilir; repo erişimi verdiğinden emin ol)
+      - name: Build (CLI)
+        run: dotnet build ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-restore
+
+      - name: Pack (CLI as tool)
+        run: dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-build -o ./nupkgs /p:Version=${{ steps.ver.outputs.version }}
+
       - name: Ensure NuGet API Key is present
         shell: bash
         run: |
           if [ -z "${{ secrets.NUGET_API_KEY }}" ]; then
-            echo "::error::Missing NUGET_API_KEY secret. Add it at Org or Repo level and grant this repo access."
+            echo "::error::Missing NUGET_API_KEY secret. Add at Org/Repo secrets and grant access."
             exit 1
           fi
 
       - name: Push to NuGet
         run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate
 
-      # Release oluştur (harici action kullanmak istemezsen aşağıdaki gh CLI alternatifini veririm)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

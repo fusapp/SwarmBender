@@ -6,6 +6,7 @@
         <AssemblyName>SwarmBender</AssemblyName>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+        <IsPackable>false</IsPackable>
     </PropertyGroup>
     <ItemGroup>
         <PackageReference Include="Azure.Identity" Version="1.16.0" />

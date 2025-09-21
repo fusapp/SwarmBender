@@ -1,4 +1,4 @@
-name: Docs (GitHub Pages)
+name: Docs (GitHub Pages without external actions)
 
 on:
   push:
@@ -8,38 +8,43 @@ on:
       - '.github/workflows/pages.yml'
 
 permissions:
-  pages: write
-  id-token: write
-  contents: read
+  contents: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Ensure no Jekyll & basic index
+      - name: Checkout (no external action)
+        run: |
+          git init .
+          git remote add origin https://github.com/${{ github.repository }}.git
+          git fetch --depth=1 origin ${{ github.sha }}
+          git checkout --detach ${{ github.sha }}
+
+      - name: Prepare docs
         run: |
           mkdir -p docs
           touch docs/.nojekyll
+          # Eğer sadece index.md varsa, en basit fallback olarak yönlendirme koy.
           if [ ! -f docs/index.html ] && [ -f docs/index.md ]; then
-            # basit dönüştürme yoksa direkt index.md servis edilir (Pages md destekler),
-            # burada sadece garantiye almak için bir fallback koyuyoruz:
             echo "<meta http-equiv='refresh' content='0; url=index.md'/>" > docs/index.html
           fi
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+
+      - name: Publish to gh-pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rm -rf out && mkdir out
+          cp -R docs/* out/ || true
+          cd out
+          git init
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Publish docs for $GITHUB_SHA"
+          git branch -M gh-pages
+          git push -f https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git gh-pages

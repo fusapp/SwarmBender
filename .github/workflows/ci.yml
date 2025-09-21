@@ -20,13 +20,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (no external action)
+        run: |
+          git init .
+          git remote add origin https://github.com/${{ github.repository }}.git
+          git fetch --depth=1 origin ${{ github.sha }}
+          git checkout --detach ${{ github.sha }}
 
       - name: Setup .NET 9
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-          cache: true
+        run: |
+          dotnet --info || true
+          echo "Using preinstalled .NET on ubuntu-latest"
+          # (ubuntu-latest already has dotnet; if you need a specific SDK, add a script to install it)
 
       - name: Restore
         run: dotnet restore

@@ -1,4 +1,4 @@
-name: Release (NuGet)
+name: Release (NuGet, no external actions)
 
 on:
   push:
@@ -6,20 +6,22 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write   # GH Release oluşturmak için
+  contents: write
   packages: write
 
 jobs:
   pack-and-push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (no external action)
+        run: |
+          git init .
+          git remote add origin https://github.com/${{ github.repository }}.git
+          git fetch --depth=1 origin ${{ github.sha }}
+          git checkout --detach ${{ github.sha }}
 
       - name: Setup .NET 9
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-          cache: true
+        run: dotnet --info || true
 
       - name: Extract version from tag
         id: v
@@ -33,26 +35,20 @@ jobs:
       - name: Build
         run: dotnet build -c Release --no-restore
 
-      - name: Pack (dotnet tool)
+      - name: Pack (tool)
         run: |
           dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj \
             -c Release \
             -p:Version=${{ steps.v.outputs.version }} \
             -o ./nupkgs
 
-      - name: Smoke test (install tool from local nupkg)
+      - name: Smoke test (install from local nupkg)
         shell: bash
         run: |
           PKG=$(ls ./nupkgs/*.nupkg | head -n1)
-          echo "Testing package: $PKG"
-          dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.v.outputs.version }} || exit 1
-          sb -h || exit 1
-
-      - name: Upload nupkg artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nupkgs
-          path: nupkgs
+          echo "Testing: $PKG"
+          dotnet tool install --global --add-source ./nupkgs sb --version ${{ steps.v.outputs.version }}
+          sb -h
 
       - name: Push to NuGet
         if: ${{ secrets.NUGET_API_KEY != '' }}
@@ -64,11 +60,10 @@ jobs:
             --source "https://api.nuget.org/v3/index.json" \
             --skip-duplicate
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: nupkgs/*.nupkg
-          tag_name: v${{ steps.v.outputs.version }}
-          name: SwarmBender v${{ steps.v.outputs.version }}
-          draft: false
-          prerelease: false
+      - name: Create GitHub Release (gh CLI)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.v.outputs.version }}" ./nupkgs/*.nupkg \
+            --title "SwarmBender v${{ steps.v.outputs.version }}" \
+            --notes "See CHANGELOG for details."

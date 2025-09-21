@@ -10,7 +10,7 @@
         <ToolCommandName>sb</ToolCommandName>
 
         <!-- NuGet metadata -->
-        <PackageId>SwarmBender</PackageId>
+        <PackageId>SwarmBender-Cli</PackageId>
         <Version>0.1.0-beta.1</Version>
         <Authors>Fusapp Dev Team</Authors>
         <Company>Fusapp OU</Company>
@@ -25,6 +25,7 @@
         <!-- Semboller opsiyonel -->
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <RestoreProjectName>SwarmBender.Cli</RestoreProjectName>
     </PropertyGroup>
 
     <ItemGroup>

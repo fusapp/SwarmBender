@@ -212,12 +212,19 @@ public sealed class RenderExecutor : IRenderExecutor
         await MergeJsonEnvDirAsync(globalEnvDir, envVars,
             skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
             fileKeys);
-
+        
+        var stackEnvDir  = Path.Combine(root, "stacks", request.StackId!, env, "env");
+        
+        await MergeJsonEnvDirAsync(stackEnvDir, envVars, // <-- NEW
+            skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct, fileKeys);
+        
         var svcEnvDir = Path.Combine(root, "services", canonicalService, "env", env);
         await MergeJsonEnvDirAsync(svcEnvDir, envVars,
             skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
             fileKeys);
 
+        
+        
         // appsettings: may add/override env vars (env mode) OR produce config (config mode)
         await ApplyAppSettingsAsync(root, request, canonicalService, env, envVars, svc, fileKeys, ct);
 
@@ -655,6 +662,7 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var files = new List<string>();
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
+        var stackEnvDir  = Path.Combine(root, "stacks", request.StackId!, env, "env"); 
         var svcEnvDir = Path.Combine(root, "services", canonicalService, "env", env);
 
         void addIfExists(string dir)
@@ -665,6 +673,7 @@ public sealed class RenderExecutor : IRenderExecutor
         }
 
         addIfExists(globalEnvDir);
+        addIfExists(stackEnvDir);
         addIfExists(svcEnvDir);
 
         if (files.Count == 0) return;

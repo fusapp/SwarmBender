@@ -18,6 +18,8 @@ public static class SecretsServiceCollectionExtensions
         services.AddSingleton<ISecretSourceProvider, AzureKeyVaultSecretSourceProvider>();
         services.AddSingleton<ISecretSourceProvider, InfisicalSecretSourceProvider>();
         services.AddSingleton<IInfisicalConfigWizard, InfisicalConfigWizard>();
+      
+        services.AddSingleton<ICiGenerator, AzdoCiGenerator>();
 
         // Engine (placeholder; implement Docker SDK adapter in the next step)
         services.AddSingleton<IDockerSecretClient, StubDockerSecretClient>();

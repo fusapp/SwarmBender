@@ -4,6 +4,7 @@ using SwarmBender.Cli.Infrastructure;
 using SwarmBender.Cli.Commands;
 using SwarmBender.Cli.Commands.Secrets;
 using SwarmBender.Cli.Commands.Utils;
+using SwarmBender.Cli.Commands.Utils.Azdo;
 using SwarmBender.Cli.Commands.Utils.Infisical;
 using SwarmBender.Services;
 using SwarmBender.Services.Abstractions;
@@ -41,6 +42,15 @@ app.Configure(cfg =>
           inf.AddCommand<InfisicalUploadCommand>("upload");
           inf.AddCommand<InfisicalInitCommand>("init");
        });
+       
+       utils.AddBranch("azdo", azdo =>
+       {
+          azdo.AddBranch("pipeline", pipeline =>
+          {
+             pipeline.AddCommand<AzdoPipelineInitCommand>("init");
+          });
+       });
+       
     });
 });
 

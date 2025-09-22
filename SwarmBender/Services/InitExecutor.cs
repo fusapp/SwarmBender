@@ -160,6 +160,7 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureDirectoryAsync(stackRoot, dry, quiet, ct);
         Tally(r1, ref c, ref s);
 
+        // core files
         r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "docker-stack.template.yml"), _stub.StackTemplateYaml,
             dry, quiet, ct);
         Tally(r1, ref c, ref s);
@@ -180,9 +181,19 @@ public sealed class InitExecutor : IInitExecutor
             Tally(r1, ref c, ref s);
         }
 
-        // Create per-environment overlay folder + a single, prefixsiz stub: global.yml
+        // NEW: stack-level process env allowlist (files win over process env; this lets you whitelist adds)
+        const string useEnvvarsStub = """
+                                      [
+                                        "CONSUL_SERVER",
+                                        "CONSUL_MASTER_TOKEN"
+                                      ]
+                                      """;
+        r1 = await _fs.EnsureFileAsync(Path.Combine(stackRoot, "use-envvars.json"), useEnvvarsStub, dry, quiet, ct);
+        Tally(r1, ref c, ref s);
+
+        // per-environment overlays + env jsons
         const string overlayStub = """
-                                   # Global overlays for this environment (merged after template).
+                                   # Global overlays for this environment (merged after template, before service-level).
                                    # Put any Compose keys here; examples below:
                                    #
                                    # services:
@@ -202,22 +213,53 @@ public sealed class InitExecutor : IInitExecutor
                                    #     #     max-file: "3"
                                    """;
 
+        const string envDefaultJsonStub = """
+                                          {
+                                            "COMPANY_NAME": "from-json",
+                                            "ENVIRONMENT_SUFFIX": ""
+                                          }
+                                          """;
+
+        const string envAppsettingsJsonStub = """
+                                              {
+                                                // Put stack-specific appsettings overrides here.
+                                                // Example:
+                                                // "ConnectionStrings": {
+                                                //   "MSSQL_Master": "Server=...;User Id=...;Password=...;Database=...;TrustServerCertificate=True;"
+                                                // }
+                                              }
+                                              """;
+
         foreach (var env in envs)
         {
             var envDir = Path.Combine(stackRoot, env);
             r1 = await _fs.EnsureDirectoryAsync(envDir, dry, quiet, ct);
             Tally(r1, ref c, ref s);
 
+            // overlays folder (no numeric prefix anymore)
             var stackDir = Path.Combine(envDir, "stack");
             r1 = await _fs.EnsureDirectoryAsync(stackDir, dry, quiet, ct);
             Tally(r1, ref c, ref s);
 
-            // ⬇️ previously: 00-stack.yml —> now: global.yml (no numeric prefix)
             var overlayPath = Path.Combine(stackDir, "global.yml");
             r1 = await _fs.EnsureFileAsync(overlayPath, overlayStub, dry, quiet, ct);
             Tally(r1, ref c, ref s);
+
+            // NEW: stack/<env>/env with default.json + appsettings.json
+            var envJsonDir = Path.Combine(envDir, "env");
+            r1 = await _fs.EnsureDirectoryAsync(envJsonDir, dry, quiet, ct);
+            Tally(r1, ref c, ref s);
+
+            r1 = await _fs.EnsureFileAsync(Path.Combine(envJsonDir, "default.json"), envDefaultJsonStub, dry, quiet,
+                ct);
+            Tally(r1, ref c, ref s);
+
+            r1 = await _fs.EnsureFileAsync(Path.Combine(envJsonDir, "appsettings.json"), envAppsettingsJsonStub, dry,
+                quiet, ct);
+            Tally(r1, ref c, ref s);
         }
 
+        // ops footer (keep)
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops"), dry, quiet, ct);
         Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "README.md"), _stub.OpsReadme, dry, quiet, ct);

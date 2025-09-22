@@ -32,6 +32,8 @@ public static class SecretsServiceCollectionExtensions
         services.AddSingleton<ISecretsPruneService, SecretsPruneService>();
         services.AddSingleton<ISecretsDoctorService, SecretsDoctorService>();
         services.AddSingleton<ISecretsRotateService, SecretsRotateService>(); 
+        
+        services.AddSingleton<IMetadataValidator, MetadataValidator>();
 
         // Engine selection via ENV:
         //   SB_SECRETS_ENGINE=docker-cli

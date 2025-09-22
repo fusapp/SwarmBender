@@ -68,7 +68,9 @@ SwarmBender Ops Folder
         "secrets/",
         "configs/files/",
         "**/*.secret",
-        "**/*.secrets"
+        "**/*.secrets",
+        "ops/private/",
+        "ops/private/**"
     };
 
     // -------- Stack template + optional top-level defs --------

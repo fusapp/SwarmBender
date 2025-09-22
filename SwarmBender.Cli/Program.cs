@@ -34,6 +34,11 @@ app.Configure(cfg =>
     cfg.AddCommand<RenderCommand>("render")
        .WithDescription("Render final stack.yml for one or more environments.");
     cfg.AddSecretsCommands();
+    cfg.AddBranch("meta", meta =>
+    {
+       meta.AddCommand<SwarmBender.Cli.Commands.Meta.MetaValidateCommand>("validate")
+          .WithDescription("Validate metadata/tenants.yml and metadata/groups.yml against built-in schema.");
+    });
     cfg.AddBranch("utils", utils =>
     {
        utils.AddCommand<UtilsCommand>("utils");

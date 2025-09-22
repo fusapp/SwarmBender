@@ -84,6 +84,42 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "policies", "images.yml"), _stub.ImagesPolicyYaml, dry,
             quiet, ct);
         Tally(r1, ref c, ref s);
+        
+        // Ensure providers folder and default providers.yml
+        r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "vars", "providers"), dry, quiet, ct);
+        Tally(r1, ref c, ref s);
+
+        const string providersSourcesYaml = """
+                                            # Secret source providers order (highest precedence first).
+                                            # Available: infisical, file, env
+                                            sources:
+                                              - file         # reads ops/private/<env>.json and stacks/*/<env>/env/*.json
+                                              - env          # process environment (filtered via use-envvars.json)
+                                              # - infisical    # requires ops/vars/providers/infisical.yml + token env var
+                                            """;
+
+        r1 = await _fs.EnsureFileAsync(
+            Path.Combine(root, "ops", "vars", "providers", "providers.yml"),
+            providersSourcesYaml,
+            dry, quiet, ct);
+        Tally(r1, ref c, ref s);
+        
+        r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "private"), dry, quiet, ct);
+        Tally(r1, ref c, ref s);
+
+        const string privateReadme = """
+                                     # ops/private (local workspace)
+
+                                     This folder is intended for **local/ephemeral** artifacts and should not be committed to Git.
+                                     Typical uses:
+                                     - Temporary JSON files for utilities (e.g., Infisical upload sources)
+                                     - Ad-hoc rendered assets or scratch files
+                                     - Local notes
+
+                                     It is automatically added to .gitignore by `sb init`.
+                                     """;
+        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "private", "README.md"), privateReadme, dry, quiet, ct);
+        Tally(r1, ref c, ref s);
 
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "checks"), dry, quiet, ct);
         Tally(r1, ref c, ref s);

@@ -1,98 +1,227 @@
-namespace SwarmBender.Cli.Commands.Utils.Azdo;
-
 using System.ComponentModel;
+using System.Text;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using SwarmBender.Services.Abstractions;
 using SwarmBender.Services.Models;
 
-/// <summary>
-/// sb utils azdo pipeline init --stack <id> -e dev,prod [--out ...] [--branch ...]
-/// Generates a ready-to-run Azure DevOps pipeline for Swarm deploy.
-/// </summary>
+namespace SwarmBender.Cli.Commands.Utils.Azdo;
+
 public sealed class AzdoPipelineInitCommand : AsyncCommand<AzdoPipelineInitCommand.Settings>
 {
-    private readonly ICiGenerator _gen;
-    public AzdoPipelineInitCommand(ICiGenerator gen) => _gen = gen;
+    private readonly IAzdoPipelineGenerator _generator;
+    public AzdoPipelineInitCommand(IAzdoPipelineGenerator generator) => _generator = generator;
 
     public sealed class Settings : CommandSettings
     {
-        [Description("Project root path (defaults to current directory).")]
+        [CommandOption("--stack <STACK_ID>")]
+        [Description("Stack id (required).")]
+        public string StackId { get; init; } = string.Empty;
+
         [CommandOption("--root <PATH>")]
+        [Description("Project root (defaults to current directory).")]
         public string Root { get; init; } = Directory.GetCurrentDirectory();
 
-        [Description("Required stack ID to deploy (e.g., 'sso').")]
-        [CommandOption("--stack <STACK_ID>")]
-        public string StackId { get; init; } = "";
+        [CommandOption("--out-dir <DIR>")]
+        [Description("Output directory for pipeline YAML (default: ops/pipelines/azdo).")]
+        public string OutDir { get; init; } = "ops/pipelines/azdo";
 
-        [Description("Comma-separated environments (e.g., dev,prod).")]
-        [CommandOption("-e|--envs <LIST>")]
-        public string EnvsCsv { get; init; } = "";
+        [CommandOption("--envs <CSV>")]
+        [Description("Environment choices (comma separated). Default: dev,prod")]
+        public string? EnvsCsv { get; init; }
 
-        [Description("Output YAML path. Default: ops/ci-templates/azure/swarm-deploy.yml")]
-        [CommandOption("--out <PATH>")]
-        public string OutPath { get; init; } = "ops/ci-templates/azure/swarm-deploy.yml";
+        [CommandOption("--env-mode <fixed|prefix>")]
+        [Description("Environment naming mode. 'fixed' uses a single environment name. 'prefix' creates NAME_{ENV}. Default: prefix")]
+        public string EnvMode { get; init; } = "prefix";
 
-        [Description("Default branch to trigger from. Default: main")]
-        [CommandOption("--branch <BRANCH>")]
-        public string Branch { get; init; } = "main";
+        [CommandOption("--env-name <NAME>")]
+        [Description("When env-mode=prefix, this is the prefix (e.g. INFRA). When env-mode=fixed, this is the fixed name (e.g. ProdInfra).")]
+        public string EnvName { get; init; } = "INFRA";
 
-        [Description("Azure DevOps pool vmImage. Default: ubuntu-latest")]
-        [CommandOption("--pool <VMIMAGE>")]
-        public string PoolVmImage { get; init; } = "ubuntu-latest";
+        [CommandOption("--vg-mode <fixed|prefix>")]
+        [Description("Variable groups mode. 'fixed' = CSV list, 'prefix' = PREFIX_{ENV}. Default: prefix")]
+        public string VgMode { get; init; } = "prefix";
 
-        [Description(".NET SDK version (UseDotNet@2). Default: 9.0.x")]
-        [CommandOption("--dotnet <VER>")]
-        public string DotnetSdk { get; init; } = "9.0.x";
+        [CommandOption("--vg-value <VALUE>")]
+        [Description("When vg-mode=prefix this is the prefix; when vg-mode=fixed this is comma-separated variable group names.")]
+        public string? VgValue { get; init; }
 
-        [Description("SwarmBender-Cli NuGet tool version. Default: 1.*")]
-        [CommandOption("--sb-version <VER>")]
-        public string SbVersion { get; init; } = "1.*";
+        [CommandOption("--include-secrets-sync")]
+        [Description("Include 'sb secrets sync' step (default: true).")]
+        [DefaultValue(true)]
+        public bool IncludeSecretsSync { get; init; } = true;
+
+        [CommandOption("--appsettings-mode <env|config>")]
+        [Description("Render appsettings into env vars or config file (default: env).")]
+        public string AppSettingsMode { get; init; } = "env";
+
+        [CommandOption("--render-out <DIR>")]
+        [Description("Render output directory (default: ops/state/last).")]
+        public string RenderOut { get; init; } = "ops/state/last";
+
+        [CommandOption("--write-history")]
+        [Description("Write render history under ops/state/history (default: true).")]
+        [DefaultValue(true)]
+        public bool WriteHistory { get; init; } = true;
+
+        [CommandOption("--with-registry")]
+        [Description("Include container registry login step (default: false).")]
+        public bool WithRegistry { get; init; } = false;
+
+        [CommandOption("--reg-user-var <VAR>")]
+        [Description("Registry username variable name (default: REGISTRY_USERNAME).")]
+        public string RegUserVar { get; init; } = "REGISTRY_USERNAME";
+
+        [CommandOption("--reg-pass-var <VAR>")]
+        [Description("Registry password/secret variable name (default: REGISTRY_PASSWORD).")]
+        public string RegPassVar { get; init; } = "REGISTRY_PASSWORD";
+
+        [CommandOption("--reg-server-var <VAR>")]
+        [Description("Registry server variable name (default: REGISTRY_SERVER).")]
+        public string RegServerVar { get; init; } = "REGISTRY_SERVER";
+
+        [CommandOption("--interactive")]
+        [Description("Interactive wizard mode.")]
+        public bool Interactive { get; init; } = false;
 
         public override ValidationResult Validate()
         {
             if (string.IsNullOrWhiteSpace(StackId))
-                return ValidationResult.Error("--stack is required.");
-
-            if (string.IsNullOrWhiteSpace(EnvsCsv))
-                return ValidationResult.Error("Provide at least one environment via -e/--envs (e.g., dev,prod).");
-
+                return ValidationResult.Error("--stack is required");
+            if (!string.Equals(EnvMode, "fixed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(EnvMode, "prefix", StringComparison.OrdinalIgnoreCase))
+                return ValidationResult.Error("--env-mode must be 'fixed' or 'prefix'");
+            if (!string.Equals(VgMode, "fixed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(VgMode, "prefix", StringComparison.OrdinalIgnoreCase))
+                return ValidationResult.Error("--vg-mode must be 'fixed' or 'prefix'");
             return ValidationResult.Success();
         }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
     {
-        var envs = s.EnvsCsv
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        // Working copies
+        var envChoices = ParseCsvOrDefault(s.EnvsCsv, new[] { "dev", "prod" });
+        var envModeStr = s.EnvMode;
+        var envName    = s.EnvName;
+        var vgModeStr  = s.VgMode;
+        var vgValue    = s.VgValue;
 
-        var req = new CiGenRequest(
+        var withRegistry       = s.WithRegistry;
+        var regServerVar       = s.RegServerVar;
+        var regUserVar         = s.RegUserVar;
+        var regPassVar         = s.RegPassVar;
+        var includeSecretsSync = s.IncludeSecretsSync;
+        var appSettingsMode    = s.AppSettingsMode;
+
+        if (s.Interactive)
+        {
+            envModeStr = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("Environment naming mode")
+                    .AddChoices("prefix", "fixed")
+                    .HighlightStyle(Style.Plain));
+
+            envName = AnsiConsole.Prompt(
+                new TextPrompt<string>(envModeStr == "prefix"
+                        ? "Environment prefix (renders as PREFIX_{ENV}). Default: INFRA"
+                        : "Fixed environment name (e.g., ProdInfra). Default: INFRA")
+                    .DefaultValue(s.EnvName)
+                    .AllowEmpty()).Trim();
+
+            var csvDefault = s.EnvsCsv ?? "dev,prod";
+            var envCsv = AnsiConsole.Prompt(
+                new TextPrompt<string>($"Environment choices as CSV. Default: {csvDefault}")
+                    .DefaultValue(csvDefault)
+                    .AllowEmpty()).Trim();
+            envChoices = ParseCsvOrDefault(envCsv, new[] { "dev", "prod" });
+
+            vgModeStr = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("Variable groups mode")
+                    .AddChoices("prefix", "fixed")
+                    .HighlightStyle(Style.Plain));
+
+            vgValue = AnsiConsole.Prompt(
+                new TextPrompt<string>(vgModeStr == "prefix"
+                        ? "Variable group prefix (expands to PREFIX_{ENV}) (optional)"
+                        : "Variable groups CSV (comma separated) (optional)")
+                    .AllowEmpty()).Trim();
+
+            withRegistry = AnsiConsole.Confirm("Include registry login step?", withRegistry);
+            if (withRegistry)
+            {
+                regServerVar = AnsiConsole.Prompt(new TextPrompt<string>("Registry server variable name").DefaultValue(regServerVar).AllowEmpty()).Trim();
+                regUserVar   = AnsiConsole.Prompt(new TextPrompt<string>("Registry username variable name").DefaultValue(regUserVar).AllowEmpty()).Trim();
+                regPassVar   = AnsiConsole.Prompt(new TextPrompt<string>("Registry password/secret variable name").DefaultValue(regPassVar).AllowEmpty()).Trim();
+            }
+
+            includeSecretsSync = AnsiConsole.Confirm("Include 'sb secrets sync' step?", includeSecretsSync);
+
+            appSettingsMode = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("AppSettings mode")
+                    .AddChoices("env", "config")
+                    .HighlightStyle(Style.Plain));
+        }
+
+        var envStrategy = string.Equals(envModeStr, "fixed", StringComparison.OrdinalIgnoreCase)
+            ? EnvNameStrategy.Fixed
+            : EnvNameStrategy.Prefix;
+
+        var vgMode = string.Equals(vgModeStr, "fixed", StringComparison.OrdinalIgnoreCase)
+            ? VarGroupsMode.FixedList
+            : VarGroupsMode.Prefix;
+
+        var req = new AzdoPipelineRequest(
             RootPath: s.Root,
-            Provider: "azdo",
-            Kind: "swarm-deploy",
             StackId: s.StackId,
-            Environments: envs,
-            OutPath: s.OutPath,
-            Branch: s.Branch,
-            PoolVmImage: s.PoolVmImage,
-            DotnetSdk: s.DotnetSdk,
-            SbVersion: s.SbVersion
+            OutDir: s.OutDir,
+            Environments: envChoices,
+            DefaultEnv: envChoices.First(),
+            EnvStrategy: envStrategy,
+            EnvName: envName,
+            VarGroupsMode: vgMode,
+            VarGroupsFixedCsv: vgMode == VarGroupsMode.FixedList ? (vgValue ?? string.Empty) : string.Empty,
+            VarGroupsPrefix: vgMode == VarGroupsMode.Prefix ? (vgValue ?? string.Empty) : string.Empty,
+            IncludeSecretsSync: includeSecretsSync,
+            AppSettingsMode: appSettingsMode,
+            RenderOutDir: s.RenderOut,
+            WriteHistory: s.WriteHistory,
+            IncludeRegistryLogin: withRegistry,
+            RegistryServerVar: regServerVar,
+            RegistryUserVar: regUserVar,
+            RegistryPassVar: regPassVar
         );
 
-        var res = await _gen.GenerateAsync(req, CancellationToken.None);
+        var result = await _generator.GenerateAsync(req, CancellationToken.None);
+        var outPath = result.OutFile;
 
-        AnsiConsole.MarkupLine("[green]Pipeline generated:[/] {0}", res.OutFile);
-        AnsiConsole.MarkupLine("Stack: [cyan]{0}[/], Envs: [cyan]{1}[/]", s.StackId, string.Join(", ", envs));
-        AnsiConsole.MarkupLine("Branch: {0} | Pool: {1}", s.Branch, s.PoolVmImage);
-        AnsiConsole.MarkupLine(@"
-[bold]Next steps:[/]
-  1) In Azure DevOps, create a new pipeline and point it to this YAML file.
-  2) Define variables if needed:
-     - [cyan]REGISTRY_SERVER[/], [cyan]REGISTRY_USERNAME[/], [cyan]REGISTRY_PASSWORD[/] (optional; login step is conditional)
-     - [cyan]DOCKER_HOST[/] if your agent talks to a remote Docker Swarm manager (e.g. tcp://host:2375).
-  3) Ensure the agent has Docker CLI available and network access to the Swarm manager.");
+        // Normalize full path
+        if (!Path.IsPathRooted(outPath))
+            outPath = Path.Combine(s.Root, outPath);
+        outPath = Path.GetFullPath(outPath);
+
+        // Ensure directory
+        var dir = Path.GetDirectoryName(outPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+
+        // Write & verify
+        await File.WriteAllTextAsync(outPath, result.Yaml ?? string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        if (!File.Exists(outPath))
+            throw new IOException($"Pipeline write verification failed. File not found after write: {outPath}");
+
+        AnsiConsole.MarkupLine("[green]Pipeline generated:[/] {0}", outPath);
+        AnsiConsole.MarkupLine("Next steps:");
+        AnsiConsole.MarkupLine("  1) Create a new Azure DevOps pipeline and point it to this YAML.");
+        AnsiConsole.MarkupLine("  2) Define required variable groups and (optionally) registry variables.");
+        AnsiConsole.MarkupLine("  3) Ensure the agent runs on your Swarm manager (Docker available).");
         return 0;
     }
+
+    private static List<string> ParseCsvOrDefault(string? csv, IEnumerable<string> fallback)
+        => !string.IsNullOrWhiteSpace(csv)
+            ? csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList()
+            : fallback.ToList();
 }

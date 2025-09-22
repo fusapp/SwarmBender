@@ -101,15 +101,6 @@ public sealed class InitExecutor : IInitExecutor
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "reports", "preflight"), dry, quiet, ct);
         Tally(r1, ref c, ref s);
 
-        r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "ci-templates"), dry, quiet, ct);
-        Tally(r1, ref c, ref s);
-        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "ci-templates", "github-actions.yml"),
-            _stub.GitHubActionsYaml, dry, quiet, ct);
-        Tally(r1, ref c, ref s);
-        r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "ci-templates", "azure-pipelines.yml"),
-            _stub.AzurePipelinesYaml, dry, quiet, ct);
-        Tally(r1, ref c, ref s);
-
         r1 = await _fs.EnsureDirectoryAsync(Path.Combine(root, "ops", "vars"), dry, quiet, ct);
         Tally(r1, ref c, ref s);
         r1 = await _fs.EnsureFileAsync(Path.Combine(root, "ops", "vars", "secrets-provider.yml"),

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using SwarmBender.Services.Abstractions;
+using SwarmBender.Services.Azdo;
 
 namespace SwarmBender.Services;
 
@@ -20,6 +21,7 @@ public static class SecretsServiceCollectionExtensions
         services.AddSingleton<IInfisicalConfigWizard, InfisicalConfigWizard>();
       
         services.AddSingleton<ICiGenerator, AzdoCiGenerator>();
+        services.AddSingleton<IAzdoPipelineGenerator, AzdoPipelineGenerator>();
 
         // Engine (placeholder; implement Docker SDK adapter in the next step)
         services.AddSingleton<IDockerSecretClient, StubDockerSecretClient>();

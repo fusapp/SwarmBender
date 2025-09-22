@@ -188,6 +188,15 @@ secrets:
   args:
     dockerPath: docker
     dockerHost: unix:///var/run/docker.sock
+
+secretize:
+  enabled: true
+  paths:
+    - "ConnectionStrings__*"
+    - "Redis__*"
+    - "Mongo__*"
+
+name_template: "sb_{scope}_{env}_{key}_{version}"
 """;
 
     public string SecretsMapYaml(string env) => $$"""

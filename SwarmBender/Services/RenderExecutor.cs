@@ -1051,13 +1051,31 @@ public sealed class RenderExecutor : IRenderExecutor
         svc.Remove("x-sb-secrets");
     }
 
+    // Keys whose list values should be merged by string union (keep order, append new)
+    private static readonly HashSet<string> StringListUnionKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "labels", "networks", "ports", "volumes", "dns", "extra_hosts", "cap_add", "cap_drop", "devices", "expose"
+    };
+
+// Keys whose list values are dictionaries keyed by "source" (service-level refs)
+    private static readonly HashSet<string> KeyedBySourceListKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "secrets", "configs"
+    };
+
+    // Non-destructive deep merge with list-aware policies.
+// - Maps: recursive merge
+// - environment: union by KEY (overlay wins for value; accepts list or map forms)
+// - secrets/configs: union by "source"; overlay updates fields
+// - string-list keys (labels, networks, ports, ...): union by string content
+// - others: replace
     private static void DeepMergeRoot(
         IDictionary<string, object?> target,
         IDictionary<string, object?> source)
     {
         foreach (var (k, v) in source)
         {
-            // Case 1: map vs map -> recursive merge
+            // Map vs map => recursive
             if (v is IDictionary<string, object?> sMap &&
                 target.TryGetValue(k, out var tVal) &&
                 tVal is IDictionary<string, object?> tMap)
@@ -1066,56 +1084,237 @@ public sealed class RenderExecutor : IRenderExecutor
                 continue;
             }
 
-            // Case 2: list merge special-case for "labels"
-            if (string.Equals(k, "labels", StringComparison.OrdinalIgnoreCase) &&
-                v is IEnumerable<object?> sList)
+            // environment union (list or map on either side)
+            if (string.Equals(k, "environment", StringComparison.OrdinalIgnoreCase))
             {
-                if (target.TryGetValue(k, out var tListObj) &&
-                    tListObj is IEnumerable<object?> tList)
-                {
-                    // Union: keep original order from template, append new ones from overlay if not present
-                    var result = new List<object?>();
-                    var seen = new HashSet<string>(StringComparer.Ordinal);
-
-                    foreach (var it in tList)
-                    {
-                        result.Add(it);
-                        if (it is string ts) seen.Add(ts);
-                    }
-
-                    foreach (var it in sList)
-                    {
-                        if (it is string ss)
-                        {
-                            if (!seen.Contains(ss))
-                            {
-                                result.Add(ss);
-                                seen.Add(ss);
-                            }
-                        }
-                        else
-                        {
-                            // Non-string item: append as-is (rare but be safe)
-                            result.Add(it);
-                        }
-                    }
-
-                    target[k] = result;
-                }
-                else
-                {
-                    // No existing list -> just take overlay list
-                    target[k] = sList.ToList();
-                }
-
+                target.TryGetValue(k, out var tEnv);
+                target[k] = MergeEnvironmentNodes(tEnv, v);
                 continue;
             }
 
-            // Default behavior:
-            //  - map vs non-map => replace
-            //  - list (non-label) vs anything => replace
-            //  - scalar vs anything => replace
+            // secrets/configs union by "source"
+            if (KeyedBySourceListKeys.Contains(k) && v is IEnumerable<object?> sKeyedList)
+            {
+                target.TryGetValue(k, out var tKeyedObj);
+                var tKeyedList = tKeyedObj as IEnumerable<object?>;
+                target[k] = MergeKeyedBySourceList(tKeyedList, sKeyedList);
+                continue;
+            }
+
+            // string list union (labels, networks, ports, volumes, ...)
+            if (StringListUnionKeys.Contains(k) && v is IEnumerable<object?> sStrList)
+            {
+                target.TryGetValue(k, out var tListObj);
+                var tStrList = tListObj as IEnumerable<object?>;
+                target[k] = MergeStringListUnion(tStrList, sStrList);
+                continue;
+            }
+
+            // Default: replace
             target[k] = v;
         }
+    }
+
+// ---- helpers ----
+
+// Merge "environment" from any combination of map/list.
+// Output is a list of "KEY=VALUE" strings; overlay wins for duplicate keys.
+    private static IList<object?> MergeEnvironmentNodes(object? targetEnv, object? overlayEnv)
+    {
+        var (tOrder, tDict) = ReadEnvNode(targetEnv);
+        var (sOrder, sDict) = ReadEnvNode(overlayEnv);
+
+        // Apply overlay values (overlay wins)
+        foreach (var (k, val) in sDict) tDict[k] = val;
+
+        // Order: keep target order first, then overlay-only keys
+        var resultOrder = new List<string>(tOrder);
+        foreach (var k in sOrder)
+            if (!resultOrder.Contains(k, StringComparer.Ordinal))
+                resultOrder.Add(k);
+
+        var list = new List<object?>();
+        foreach (var k in resultOrder)
+        {
+            if (!tDict.TryGetValue(k, out var val)) continue;
+            list.Add($"{k}={val}");
+        }
+
+        return list;
+    }
+
+// Parse environment node into (order, dict) from either map or list forms.
+    private static (List<string> order, Dictionary<string, string> dict) ReadEnvNode(object? node)
+    {
+        var order = new List<string>();
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        if (node is IDictionary<string, object?> map)
+        {
+            foreach (var kv in map)
+            {
+                var key = kv.Key;
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                var val = kv.Value?.ToString() ?? string.Empty;
+                if (!dict.ContainsKey(key)) order.Add(key);
+                dict[key] = val;
+            }
+
+            return (order, dict);
+        }
+
+        if (node is IEnumerable<object?> list)
+        {
+            foreach (var it in list)
+            {
+                var s = it?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(s)) continue;
+
+                var idx = s.IndexOf('=');
+                var key = idx >= 0 ? s[..idx] : s;
+                var val = idx >= 0 ? s[(idx + 1)..] : string.Empty;
+
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (!dict.ContainsKey(key)) order.Add(key);
+                dict[key] = val;
+            }
+
+            return (order, dict);
+        }
+
+        return (order, dict);
+    }
+
+// Merge service-level secret/config refs by "source" key.
+// Accepts items like "name" (string) or { source: name, target: ..., mode: ... }.
+    private static IList<object?> MergeKeyedBySourceList(IEnumerable<object?>? targetList,
+        IEnumerable<object?> overlayList)
+    {
+        var result = new List<object?>();
+        var indexBySource = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        void AddOrUpdate(object? item, bool overlay)
+        {
+            var (src, asMap) = ExtractSource(item);
+            if (string.IsNullOrWhiteSpace(src))
+            {
+                // Unknown shape — append as-is if not already equal
+                if (!result.Any(x => ObjectEquals(x, item))) result.Add(item);
+                return;
+            }
+
+            if (indexBySource.TryGetValue(src, out var idx))
+            {
+                // Update existing map with overlay fields if overlay provides a map
+                if (overlay && asMap is not null && result[idx] is IDictionary<string, object?> existingMap)
+                {
+                    foreach (var kv in asMap)
+                        existingMap[kv.Key] = kv.Value;
+                }
+                // Keep original position
+            }
+            else
+            {
+                indexBySource[src] = result.Count;
+                // Prefer the richer overlay map if available
+                result.Add(asMap ?? item);
+            }
+        }
+
+        // First: baseline (preserve order)
+        if (targetList != null)
+            foreach (var it in targetList)
+                AddOrUpdate(it, overlay: false);
+
+        // Then: overlay (update or append)
+        foreach (var it in overlayList) AddOrUpdate(it, overlay: true);
+
+        return result;
+    }
+
+// Extract "source" from list item (string or map).
+    private static (string? source, IDictionary<string, object?>? map) ExtractSource(object? item)
+    {
+        if (item is IDictionary<string, object?> m)
+        {
+            // Prefer "source"
+            if (m.TryGetValue("source", out var srcObj))
+            {
+                var sVal = srcObj?.ToString();
+                if (!string.IsNullOrWhiteSpace(sVal))
+                    return (sVal, m);
+            }
+
+            // Fallback: some people use { name: ... }
+            if (m.TryGetValue("name", out var nameObj))
+            {
+                var nVal = nameObj?.ToString();
+                if (!string.IsNullOrWhiteSpace(nVal))
+                    return (nVal, m);
+            }
+
+            return (null, m);
+        }
+
+        if (item is string str && !string.IsNullOrWhiteSpace(str))
+            return (str, null);
+
+        return (null, null);
+    }
+
+// Merge lists of (mostly) strings by union, preserving target order.
+    private static IList<object?> MergeStringListUnion(IEnumerable<object?>? targetList,
+        IEnumerable<object?> overlayList)
+    {
+        var result = new List<object?>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void append(object? it)
+        {
+            var key = it?.ToString() ?? "";
+            if (seen.Contains(key)) return;
+            result.Add(it);
+            seen.Add(key);
+        }
+
+        if (targetList != null)
+            foreach (var it in targetList)
+                append(it);
+
+        foreach (var it in overlayList) append(it);
+
+        return result;
+    }
+
+// Value equality with ToString() fallback for non-primitive cases
+    private static bool ObjectEquals(object? a, object? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        if (a is string sa && b is string sb) return string.Equals(sa, sb, StringComparison.Ordinal);
+        if (a is IDictionary<string, object?> ma && b is IDictionary<string, object?> mb)
+        {
+            if (ma.Count != mb.Count) return false;
+            foreach (var kv in ma)
+            {
+                if (!mb.TryGetValue(kv.Key, out var vb)) return false;
+                if (!ObjectEquals(kv.Value, vb)) return false;
+            }
+
+            return true;
+        }
+
+        if (a is IEnumerable<object?> ea && b is IEnumerable<object?> eb)
+        {
+            var la = ea.ToList();
+            var lb = eb.ToList();
+            if (la.Count != lb.Count) return false;
+            for (int i = 0; i < la.Count; i++)
+                if (!ObjectEquals(la[i], lb[i]))
+                    return false;
+            return true;
+        }
+
+        return a.Equals(b);
     }
 }

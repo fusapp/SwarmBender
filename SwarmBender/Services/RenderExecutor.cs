@@ -118,16 +118,23 @@ public sealed class RenderExecutor : IRenderExecutor
 
             // compose services
             var finalServices = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var svcKey in baseServices.Keys.ToList())
+
+            var serviceKeys = baseServices.Keys.ToList();
+            foreach (var svcKey in serviceKeys)
             {
-                var tmplSvcName = svcKey;
-                var svcMap = baseServices[svcKey] as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+                var tmplSvcName = svcKey; // name that will appear in output
+                var svcMap = baseServices[svcKey] as IDictionary<string, object?>
+                             ?? new Dictionary<string, object?>();
 
                 var canonical = aliasMap.TryGetValue(tmplSvcName, out var c) && !string.IsNullOrWhiteSpace(c)
                     ? c
                     : tmplSvcName;
 
-                var composedService = await ComposeServiceAsync(root, request, canonical, env, svcMap, secretsMap, ct);
+                // NOTE: pass the output service name for SB_SERVICE_NAME interpolation
+                var composedService = await ComposeServiceAsync(
+                    root, request, canonicalService: canonical, env, svcMap,
+                    secretsMap: secretsMap, serviceName: tmplSvcName, ct);
+
                 finalServices[tmplSvcName] = composedService;
             }
 
@@ -179,56 +186,69 @@ public sealed class RenderExecutor : IRenderExecutor
         string env,
         IDictionary<string, object?> svc,
         IReadOnlyDictionary<string, string> secretsMap,
+        string serviceName, // <-- output YAML key for this service
         CancellationToken ct)
     {
-        // service-level overlays (highest precedence)
-        await MergeServiceOverlayDirAsync(Path.Combine(root, "services", canonicalService, env), canonicalService, svc,
-            ct);
+        // 1) Service-level overlays (highest precedence)
+        await MergeServiceOverlayDirAsync(
+            Path.Combine(root, "services", canonicalService, env),
+            canonicalService, svc, ct);
 
-        // capture environment & labels order AFTER overlays
+        // 2) Capture current environment & labels order AFTER overlays
         var templateEnvOrder =
             ExtractEnvKeyOrderFromNode(svc.TryGetValue("environment", out var rawEnvNode) ? rawEnvNode : null);
 
-        var templateLabelsOrder = new List<string>();
-        var rawLabelsNode0 = svc.TryGetValue("labels", out var rawLabelsNodeA) ? rawLabelsNodeA : null;
-        templateLabelsOrder.AddRange(ExtractLabelOrderFromNode(rawLabelsNode0));
-        if (svc.TryGetValue("deploy", out var deployNode0) && deployNode0 is IDictionary<string, object?> dep0 &&
-            dep0.TryGetValue("labels", out var depLabelsNode0))
+// --- Non-destructive labels capture (keep originals if we can't normalize) ---
+
+// Service-level labels: keep original node so we can restore if normalization fails
+        object? rawSvcLabels = null;
+        var serviceLabelsOrder = new List<string>();
+        if (svc.TryGetValue("labels", out var tmpRawSvcLabels))
         {
-            foreach (var k in ExtractLabelOrderFromNode(depLabelsNode0))
-                if (!templateLabelsOrder.Contains(k, StringComparer.OrdinalIgnoreCase))
-                    templateLabelsOrder.Add(k);
+            rawSvcLabels = tmpRawSvcLabels;
+            serviceLabelsOrder.AddRange(ExtractLabelOrderFromNode(rawSvcLabels));
         }
 
-        // Track keys from files (JSON/appsettings) -> file wins over process env
+// Deploy-level labels: capture map + original node + order
+        IDictionary<string, object?>? deployMap = null;
+        object? rawDepLabels = null;
+        var deployLabelsOrder = new List<string>();
+        if (svc.TryGetValue("deploy", out var deployNode) && deployNode is IDictionary<string, object?> dm)
+        {
+            deployMap = dm;
+            if (dm.TryGetValue("labels", out var tmpRawDepLabels))
+            {
+                rawDepLabels = tmpRawDepLabels;
+                deployLabelsOrder.AddRange(ExtractLabelOrderFromNode(rawDepLabels));
+            }
+        }
+
+        // 3) Track keys from files (JSON/appsettings) -> file wins over process env
         var fileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // ENVIRONMENT
-        var envVars =
-            MergeHelpers.NormalizeEnvironment(svc.TryGetValue("environment", out var envNode) ? envNode : null);
+        // 4) ENVIRONMENT gather (template -> global -> stack -> service)
+        var envVars = MergeHelpers.NormalizeEnvironment(
+            svc.TryGetValue("environment", out var envNode) ? envNode : null);
 
-        // Merge from global/service JSON (skip appsettings when mode=config)
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
         await MergeJsonEnvDirAsync(globalEnvDir, envVars,
             skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
             fileKeys);
-        
-        var stackEnvDir  = Path.Combine(root, "stacks", request.StackId!, env, "env");
-        
-        await MergeJsonEnvDirAsync(stackEnvDir, envVars, // <-- NEW
-            skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct, fileKeys);
-        
+
+        var stackEnvDir = Path.Combine(root, "stacks", request.StackId!, env, "env");
+        await MergeJsonEnvDirAsync(stackEnvDir, envVars,
+            skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
+            fileKeys);
+
         var svcEnvDir = Path.Combine(root, "services", canonicalService, "env", env);
         await MergeJsonEnvDirAsync(svcEnvDir, envVars,
             skipAppSettings: request.AppSettingsMode.Equals("config", StringComparison.OrdinalIgnoreCase), ct,
             fileKeys);
 
-        
-        
-        // appsettings: may add/override env vars (env mode) OR produce config (config mode)
+        // 5) appsettings.*.json => env or config
         await ApplyAppSettingsAsync(root, request, canonicalService, env, envVars, svc, fileKeys, ct);
 
-        // Process env overlay with allowlist
+        // 6) Process environment overlay with allowlist
         var allow = await LoadAllowListAsync(root, request.StackId!, canonicalService, env, ct);
         var processEnv = GetProcessEnvironment();
         foreach (var kv in processEnv)
@@ -245,39 +265,60 @@ public sealed class RenderExecutor : IRenderExecutor
                 envVars[key] = val;
         }
 
-        // LABELS normalize (deploy.labels -> service.labels)
-        var labelDict =
-            MergeHelpers.NormalizeLabels(svc.TryGetValue("labels", out var labelsNode2) ? labelsNode2 : null);
-        if (svc.TryGetValue("deploy", out var deployNode) && deployNode is IDictionary<string, object?> deployMap &&
-            deployMap.TryGetValue("labels", out var depLabelsNode))
+        // 7) Labels: non-destructive normalization and no cross-merge
+
+// Service-level labels
+        if (rawSvcLabels is not null)
         {
-            foreach (var kv in MergeHelpers.NormalizeLabels(depLabelsNode))
-                labelDict[kv.Key] = kv.Value;
-            deployMap.Remove("labels");
+            // Try to normalize to "key=value" pairs; if it yields nothing, keep the original YAML node.
+            var svcDict = MergeHelpers.NormalizeLabels(rawSvcLabels);
+            if (svcDict.Count > 0)
+                svc["labels"] = BuildLabelsSequence(svcDict, serviceLabelsOrder);
+            else
+                svc["labels"] = rawSvcLabels; // keep original (e.g., complex strings like backticks)
+        }
+        else
+        {
+            // No service-level labels at all
+            svc.Remove("labels");
         }
 
-        // write labels as sequence of "key=value" (template order first)
-        if (labelDict.Count > 0)
-            svc["labels"] = BuildLabelsSequence(labelDict, templateLabelsOrder);
-        else
-            svc.Remove("labels");
+// Deploy-level labels
+        if (deployMap is not null)
+        {
+            if (rawDepLabels is not null)
+            {
+                var depDict = MergeHelpers.NormalizeLabels(rawDepLabels);
+                if (depDict.Count > 0)
+                    deployMap["labels"] = BuildLabelsSequence(depDict, deployLabelsOrder);
+                else
+                    deployMap["labels"] = rawDepLabels; // keep original node
+            }
+            else
+            {
+                deployMap.Remove("labels");
+            }
+        }
 
-        // SECRETS from secrets-map via x-sb-secrets
+        // 8) Attach secrets from secrets-map via x-sb-secrets
         AttachSecretsFromMap(svc, secretsMap);
 
-        // Token vars for interpolation
+        // 9) Token variables for interpolation (includes reserved SB_* tokens)
         var tokenVars = new Dictionary<string, string>(envVars, StringComparer.OrdinalIgnoreCase);
         foreach (var kv in processEnv)
             if (!tokenVars.ContainsKey(kv.Key))
                 tokenVars[kv.Key] = kv.Value ?? string.Empty;
 
-        // Special ${ENVVARS}
-        tokenVars["ENVVARS"] = BuildEnvVarsInline(tokenVars: envVars);
+        // Reserved tokens
+        tokenVars["SB_STACK_ID"] = request.StackId ?? string.Empty;
+        tokenVars["SB_ENV"] = env;
+        tokenVars["SB_SERVICE_NAME"] = serviceName; // <- output key under services
+        tokenVars["ENVVARS"] = BuildEnvVarsInline(envVars); // convenience for “inline” usage
 
-        // Put env as sequence of "KEY=VALUE" (preserve order)
+        // 10) Put env as sequence of "KEY=VALUE" (preserve order)
         svc["environment"] = BuildEnvironmentSequence(envVars, templateEnvOrder);
 
-        // Expand tokens across the service map
+        // 11) Expand tokens across entire service map (keys & values, including label list items)
         var svcExpanded = ExpandMapTokens(svc, tokenVars);
         return svcExpanded;
     }
@@ -662,7 +703,7 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         var files = new List<string>();
         var globalEnvDir = Path.Combine(root, "stacks", "all", env, "env");
-        var stackEnvDir  = Path.Combine(root, "stacks", request.StackId!, env, "env"); 
+        var stackEnvDir = Path.Combine(root, "stacks", request.StackId!, env, "env");
         var svcEnvDir = Path.Combine(root, "services", canonicalService, "env", env);
 
         void addIfExists(string dir)
@@ -1016,21 +1057,65 @@ public sealed class RenderExecutor : IRenderExecutor
     {
         foreach (var (k, v) in source)
         {
-            if (v is IDictionary<string, object?> sMap)
+            // Case 1: map vs map -> recursive merge
+            if (v is IDictionary<string, object?> sMap &&
+                target.TryGetValue(k, out var tVal) &&
+                tVal is IDictionary<string, object?> tMap)
             {
-                if (!target.TryGetValue(k, out var tVal) || tVal is not IDictionary<string, object?> tMap)
+                DeepMergeRoot(tMap, sMap);
+                continue;
+            }
+
+            // Case 2: list merge special-case for "labels"
+            if (string.Equals(k, "labels", StringComparison.OrdinalIgnoreCase) &&
+                v is IEnumerable<object?> sList)
+            {
+                if (target.TryGetValue(k, out var tListObj) &&
+                    tListObj is IEnumerable<object?> tList)
                 {
-                    tMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                    target[k] = tMap;
+                    // Union: keep original order from template, append new ones from overlay if not present
+                    var result = new List<object?>();
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+
+                    foreach (var it in tList)
+                    {
+                        result.Add(it);
+                        if (it is string ts) seen.Add(ts);
+                    }
+
+                    foreach (var it in sList)
+                    {
+                        if (it is string ss)
+                        {
+                            if (!seen.Contains(ss))
+                            {
+                                result.Add(ss);
+                                seen.Add(ss);
+                            }
+                        }
+                        else
+                        {
+                            // Non-string item: append as-is (rare but be safe)
+                            result.Add(it);
+                        }
+                    }
+
+                    target[k] = result;
+                }
+                else
+                {
+                    // No existing list -> just take overlay list
+                    target[k] = sList.ToList();
                 }
 
-                DeepMergeRoot((IDictionary<string, object?>)target[k]!, sMap);
+                continue;
             }
-            else
-            {
-                // lists/scalars: override
-                target[k] = v;
-            }
+
+            // Default behavior:
+            //  - map vs non-map => replace
+            //  - list (non-label) vs anything => replace
+            //  - scalar vs anything => replace
+            target[k] = v;
         }
     }
 }

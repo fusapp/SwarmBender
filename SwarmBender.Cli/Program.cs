@@ -27,6 +27,7 @@ var app = new CommandApp(registrar);
 app.Configure(cfg =>
 {
     cfg.SetApplicationName("sb");
+    cfg.UseAssemblyInformationalVersion();
     cfg.AddCommand<InitCommand>("init")
        .WithDescription("Initialize project root or a specific stack scaffold.");
     cfg.AddCommand<ValidateCommand>("validate")

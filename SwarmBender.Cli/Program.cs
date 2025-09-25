@@ -1,63 +1,19 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Spectre.Console.Cli;
-using SwarmBender.Cli.Infrastructure;
+using SwarmBender.Cli;
 using SwarmBender.Cli.Commands;
-using SwarmBender.Cli.Commands.Secrets;
-using SwarmBender.Cli.Commands.Utils;
-using SwarmBender.Cli.Commands.Utils.Azdo;
-using SwarmBender.Cli.Commands.Utils.Infisical;
-using SwarmBender.Services;
-using SwarmBender.Services.Abstractions;
+using SwarmBender.Core;
 
-var services = new ServiceCollection();
+var services = new ServiceCollection()
+    .AddSwarmBenderCore(Directory.GetCurrentDirectory())
+    ;
 
-// Core services
-services.AddSingleton<IInitExecutor, InitExecutor>();
-services.AddSingleton<IFileSystem, FileSystem>();
-services.AddSingleton<IEnvParser, EnvParser>();
-services.AddSingleton<IStubContent, StubContent>();
-services.AddSingleton<IValidator, Validator>();
-services.AddSingleton<IYamlLoader, YamlLoader>();
-services.AddSingleton<IRenderExecutor, RenderExecutor>(); // NEW
-services.AddSwarmBenderSecrets();
-
-var registrar = new TypeRegistrar(services);
-var app = new CommandApp(registrar);
-
+var app = new CommandApp(new SwarmBenderTypeRegistrar(services));
 app.Configure(cfg =>
 {
     cfg.SetApplicationName("sb");
-    cfg.UseAssemblyInformationalVersion();
-    cfg.AddCommand<InitCommand>("init")
-       .WithDescription("Initialize project root or a specific stack scaffold.");
-    cfg.AddCommand<ValidateCommand>("validate")
-       .WithDescription("Validate a stack (or all stacks) against policies and basic schema.");
-    cfg.AddCommand<RenderCommand>("render")
-       .WithDescription("Render final stack.yml for one or more environments.");
-    cfg.AddSecretsCommands();
-    cfg.AddBranch("meta", meta =>
-    {
-       meta.AddCommand<SwarmBender.Cli.Commands.Meta.MetaValidateCommand>("validate")
-          .WithDescription("Validate metadata/tenants.yml and metadata/groups.yml against built-in schema.");
-    });
-    cfg.AddBranch("utils", utils =>
-    {
-       utils.AddCommand<UtilsCommand>("utils");
-       utils.AddBranch("infisical", inf =>
-       {
-          inf.AddCommand<InfisicalUploadCommand>("upload");
-          inf.AddCommand<InfisicalInitCommand>("init");
-       });
-       
-       utils.AddBranch("azdo", azdo =>
-       {
-          azdo.AddBranch("pipeline", pipeline =>
-          {
-             pipeline.AddCommand<AzdoPipelineInitCommand>("init");
-          });
-       });
-       
-    });
+    cfg.AddCommand<InitCommand>("init");
+    cfg.AddCommand<RenderCommand>("render");
 });
 
-return app.Run(args);
+return await app.RunAsync(args);

@@ -1,88 +1,70 @@
+using System.ComponentModel;
 using Spectre.Console;
 using Spectre.Console.Cli;
-using System.ComponentModel;
-using SwarmBender.Services.Abstractions;
-using SwarmBender.Services.Models;
 
 namespace SwarmBender.Cli.Commands;
 
-/// <summary>
-/// Initializes the root scaffold (no stack-id) or a single stack (with stack-id).
-/// Delegates all logic to IInitExecutor (DI). Async version.
-/// </summary>
-public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
+/// <summary>Scaffold minimal folder layout.</summary>
+public sealed class InitCommand : Command<InitCommand.Settings>
 {
-    private readonly IInitExecutor _exec;
-
-    public InitCommand(IInitExecutor exec) => _exec = exec;
-
     public sealed class Settings : CommandSettings
     {
-        [CommandArgument(0, "[STACK_ID]")]
-        [Description("Optional stack id. If omitted, initializes the root scaffold.")]
-        public string? StackId { get; init; }
+        [Description("Root path (defaults to cwd).")]
+        [CommandOption("--root <PATH>")]
+        public string Root { get; init; } = Directory.GetCurrentDirectory();
 
-        [CommandOption("-e|--env|--environments <ENV>")]
-        [Description("Environment names (comma-separated or multiple flags). Default: dev,prod")]
-        public string[] Environments { get; init; } = new[] { "dev", "prod" };
-
-        [CommandOption("--path <DIR>")]
-        [Description("Root directory to initialize (default: current directory).")]
-        public string Path { get; init; } = ".";
-
-        [CommandOption("--no-global-defs")]
-        [Description("Do not create global baseline stubs under stacks/all/<env>.")]
-        public bool NoGlobalDefs { get; init; }
-
-        [CommandOption("--no-defs")]
-        [Description("Stack mode: do not create stack-level secrets.yml/configs.yml stubs.")]
-        public bool NoDefs { get; init; }
-
-        [CommandOption("--no-aliases")]
-        [Description("Stack mode: do not create aliases.yml stub.")]
-        public bool NoAliases { get; init; }
-
-        [CommandOption("--dry-run")]
-        [Description("Show what would be created without writing files.")]
-        public bool DryRun { get; init; }
-
-        [CommandOption("--quiet")]
-        [Description("Suppress non-essential output.")]
-        public bool Quiet { get; init; }
+        [Description("Environments CSV (default: dev,prod)")]
+        [CommandOption("--env <CSV>")]
+        public string Envs { get; init; } = "dev,prod";
     }
 
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
+    public override int Execute(CommandContext context, Settings settings)
     {
-        var request = new InitRequest(
-            StackId: s.StackId,
-            EnvNames: s.Environments,
-            RootPath: s.Path,
-            NoGlobalDefs: s.NoGlobalDefs,
-            NoDefs: s.NoDefs,
-            NoAliases: s.NoAliases,
-            DryRun: s.DryRun,
-            Quiet: s.Quiet);
+        var root = settings.Root;
+        var envs = settings.Envs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        var result = await _exec.ExecuteAsync(request);
+        Directory.CreateDirectory(Path.Combine(root, "stacks", "all"));
+        Directory.CreateDirectory(Path.Combine(root, "ops", "state", "last"));
+        Directory.CreateDirectory(Path.Combine(root, "ops", "state", "history"));
+        Directory.CreateDirectory(Path.Combine(root, "ops", "vars", "private"));
 
-        if (!s.Quiet)
+        foreach (var env in envs)
         {
-            if (result.InvalidEnvs.Count > 0)
-            {
-                AnsiConsole.MarkupLine("[red]Invalid environment name(s):[/] {0}", string.Join(", ", result.InvalidEnvs));
-                AnsiConsole.MarkupLine("Allowed pattern: [grey]^[a-z0-9][-_.a-z0-9]*$[/]");
-            }
-
-            AnsiConsole.MarkupLine("[green]Done[/]. Created: {0}, Skipped: {1}",
-                result.CreatedCount, result.SkippedCount);
-
-            if (s.DryRun)
-                AnsiConsole.MarkupLine("[yellow](dry-run: no files written)[/]");
+            Directory.CreateDirectory(Path.Combine(root, "stacks", "all", env, "env"));
+            var stackDir = Path.Combine(root, "stacks", "all", env, "stack");
+            Directory.CreateDirectory(stackDir);
+            var globalYml = Path.Combine(stackDir, "global.yml");
+            if (!File.Exists(globalYml))
+                File.WriteAllText(globalYml, "# global overlays for this env\n");
         }
 
-        if (result.InvalidEnvs.Count > 0)
-            return 3;
+        // Minimal sb.yml
+        var sbYml = Path.Combine(root, "ops", "sb.yml");
+        if (!File.Exists(sbYml))
+            File.WriteAllText(sbYml, """
+version: 1
+render:
+  appsettingsMode: env
+  outDir: ops/state/last
+  writeHistory: true
+tokens:
+  user: {}
+secretize:
+  enabled: true
+  paths: []
+secrets:
+  engine:
+    type: docker-cli
+    args: {}
+providers:
+  order:
+    - type: file
+    - type: env
+    - type: azure-kv
+    - type: infisical
+""");
 
-        return result.CreatedCount > 0 && result.SkippedCount > 0 ? 2 : 0;
+        AnsiConsole.MarkupLine("[green]Scaffold completed.[/]");
+        return 0;
     }
 }

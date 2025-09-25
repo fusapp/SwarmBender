@@ -1,8 +1,12 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender", "SwarmBender\SwarmBender.csproj", "{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Core", "SwarmBender.Core\SwarmBender.Core.csproj", "{4B003F60-F89E-4631-90EB-853086428DA8}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Cli", "SwarmBender.Cli\SwarmBender.Cli.csproj", "{65F0A6B7-95F6-4639-A780-69FFFD2201DA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Cli", "SwarmBender.Cli\SwarmBender.Cli.csproj", "{9BF6F3D3-B1E6-442C-A497-DC5B49B2F87F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Core.Data", "SwarmBender.Core.Data\SwarmBender.Core.Data.csproj", "{0BD5EF4C-7BA6-4C7B-9B1A-26CE94EB890B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SwarmBender.Core.Tests", "SwarmBender.Core.Tests\SwarmBender.Core.Tests.csproj", "{6938765B-B05A-4C01-BE45-C3B540751C00}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -10,14 +14,22 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{EB38ACED-A49F-47BB-A1BA-BDE4A2D794D2}.Release|Any CPU.Build.0 = Release|Any CPU
-		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{65F0A6B7-95F6-4639-A780-69FFFD2201DA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4B003F60-F89E-4631-90EB-853086428DA8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4B003F60-F89E-4631-90EB-853086428DA8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4B003F60-F89E-4631-90EB-853086428DA8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4B003F60-F89E-4631-90EB-853086428DA8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9BF6F3D3-B1E6-442C-A497-DC5B49B2F87F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9BF6F3D3-B1E6-442C-A497-DC5B49B2F87F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9BF6F3D3-B1E6-442C-A497-DC5B49B2F87F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9BF6F3D3-B1E6-442C-A497-DC5B49B2F87F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0BD5EF4C-7BA6-4C7B-9B1A-26CE94EB890B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0BD5EF4C-7BA6-4C7B-9B1A-26CE94EB890B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0BD5EF4C-7BA6-4C7B-9B1A-26CE94EB890B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0BD5EF4C-7BA6-4C7B-9B1A-26CE94EB890B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6938765B-B05A-4C01-BE45-C3B540751C00}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6938765B-B05A-4C01-BE45-C3B540751C00}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6938765B-B05A-4C01-BE45-C3B540751C00}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6938765B-B05A-4C01-BE45-C3B540751C00}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 	EndGlobalSection

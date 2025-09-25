@@ -1,0 +1,34 @@
+<Project Sdk="MSTest.Sdk/3.10.4">
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <EnablePlaywright>true</EnablePlaywright>
+        <IsPackable>false</IsPackable>
+        <TestingPlatformShowTestsFailure>true</TestingPlatformShowTestsFailure>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\SwarmBender.Core\SwarmBender.Core.csproj" />
+        <ProjectReference Include="..\SwarmBender.Core.Data\SwarmBender.Core.Data.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- Tutarlı MSTest sürümleri -->
+        <PackageReference Include="MSTest.TestAdapter" Version="3.10.4" />
+        <PackageReference Include="MSTest.TestFramework" Version="3.10.4" />
+        <PackageReference Include="MSTest.Analyzers" Version="3.10.4">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+
+        <!-- Diğer bağımlılıklar -->
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+        <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" Version="1.8.4" />
+        <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" Version="17.14.2" />
+        <PackageReference Include="Microsoft.Playwright.MSTest" Version="1.55.0" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.9" />
+        <PackageReference Include="Bogus" Version="35.6.3" />
+    </ItemGroup>
+</Project>

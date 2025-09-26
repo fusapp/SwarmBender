@@ -77,16 +77,6 @@ namespace SwarmBender.Core.Pipeline.Stages
                         };
                     }
 
-                    // Attach to service; use decimal 288 (= 0440) for mode.
-                    svc.Secrets.Add(new ServiceSecretRef
-                    {
-                        Source = externalName,
-                        Target = null,
-                        Mode = 288
-                    });
-
-                    // Remove plain env value (do not leak)
-                    
                     svc.Secrets ??= new List<ServiceSecretRef>();
                     bool alreadyAttached = svc.Secrets.Exists(s =>
                         s.Source.Equals(externalName, StringComparison.OrdinalIgnoreCase));

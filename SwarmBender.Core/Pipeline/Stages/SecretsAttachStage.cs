@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
+using SwarmBender.Core.Util;
 
 namespace SwarmBender.Core.Pipeline.Stages
 {
@@ -35,7 +36,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             // root-level secrets dict must be Dictionary<string, Secret>
             ctx.Working.Secrets ??= new Dictionary<string, Data.Compose.Secret>(StringComparer.OrdinalIgnoreCase);
 
-            var patterns = secretize.Paths.Select(WildcardToRegex).ToArray();
+            var patterns = secretize.Paths.Select(SecretUtil.WildcardToRegex).ToArray();
 
             foreach (var (svcName, svc) in services)
             {
@@ -54,16 +55,8 @@ namespace SwarmBender.Core.Pipeline.Stages
                     
                     var value = envMap[key] ?? string.Empty;
 
-                    var versionSuffix =
-                        secretsCfg?.VersionMode?.Equals("content-sha", StringComparison.OrdinalIgnoreCase) == true
-                        ? ShortSha256(value, 16)
-                        : "v1";
-
-                    var externalName = (secretsCfg?.NameTemplate ?? "sb_{scope}_{env}_{key}_{version}")
-                        .Replace("{scope}",   $"{ctx.Request.StackId}_{svcName}", StringComparison.OrdinalIgnoreCase)
-                        .Replace("{env}",     ctx.Request.Env,                    StringComparison.OrdinalIgnoreCase)
-                        .Replace("{key}",     key,                                StringComparison.OrdinalIgnoreCase)
-                        .Replace("{version}", versionSuffix,                      StringComparison.OrdinalIgnoreCase);
+                    var versionSuffix = SecretUtil.VersionSuffix(value, secretsCfg?.VersionMode);
+                    var externalName  = SecretUtil.MakeExternalName(secretsCfg?.NameTemplate, ctx.Request.StackId, svcName, ctx.Request.Env, key, versionSuffix);
 
                     // Register root external secret (idempotent)
                     if (!ctx.Working.Secrets.ContainsKey(externalName))
@@ -132,18 +125,6 @@ namespace SwarmBender.Core.Pipeline.Stages
             return dict;
         }
 
-        private static Regex WildcardToRegex(string pattern)
-        {
-            var escaped = Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".");
-            return new Regex("^" + escaped + "$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        }
-
-        private static string ShortSha256(string content, int hexLen)
-        {
-            using var sha = SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(content ?? string.Empty));
-            var hex = Convert.ToHexString(bytes);
-            return hex.Substring(0, Math.Clamp(hexLen, 4, hex.Length));
-        }
+        
     }
 }

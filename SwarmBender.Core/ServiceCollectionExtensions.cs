@@ -6,6 +6,7 @@ using SwarmBender.Core.Pipeline;
 using SwarmBender.Core.Pipeline.Stages;
 using SwarmBender.Core.Providers.Azure;
 using SwarmBender.Core.Providers.Infisical;
+using SwarmBender.Core.Services;
 
 namespace SwarmBender.Core;
 
@@ -28,6 +29,11 @@ public static class ServiceCollectionExtensions
         // Providers
         services.AddSingleton<IAzureKvCollector, AzureKvCollector>();
         services.AddSingleton<IInfisicalCollector, InfisicalCollector>();
+        services.AddSingleton<IInfisicalUploader, InfisicalUploader>();
+        
+        
+        services.AddSingleton<ISecretDiscovery, SecretDiscovery>();
+        services.AddSingleton<ISecretsEngineRunnerFactory, SecretsEngineRunnerFactory>();
 
         // Orchestrator + stages
         services.AddSingleton<IRenderOrchestrator, RenderOrchestrator>();

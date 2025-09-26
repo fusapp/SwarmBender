@@ -168,6 +168,9 @@ public sealed class ProvidersAzureKv
     {
         ["__"] = "--"
     };
+    
+    [YamlMember(Alias = "routes", ApplyNamingConventions = false)]
+    public List<SecretRouteRule> Routes { get; init; } = new();
 }
 
 public sealed class ProvidersInfisical
@@ -207,6 +210,9 @@ public sealed class ProvidersInfisical
         "Redis__*",
         "Mongo__*"
     };
+    
+    [YamlMember(Alias = "routes", ApplyNamingConventions = false)]
+    public List<SecretRouteRule> Routes { get; init; } = new();
 }
 
 // --- metadata ---
@@ -248,4 +254,23 @@ public sealed class SchemaSection
 
     [YamlMember(Alias = "enums", ApplyNamingConventions = false)]
     public Dictionary<string, List<string>> Enums { get; init; } = new();
+}
+
+public sealed class SecretRouteRule
+{
+    // Anahtar kalıbı(ları) (glob). İlk eşleşen kural kazanır.
+    [YamlMember(Alias = "match", ApplyNamingConventions = false)]
+    public List<string> Match { get; init; } = new();
+
+    // Okuma yolları (sıralı). İlk bulunan mevcut değer kabul edilir.
+    [YamlMember(Alias = "readPaths", ApplyNamingConventions = false)]
+    public List<string> ReadPaths { get; init; } = new();
+
+    // Yazım hedefi (upsert buraya). Zorunlu.
+    [YamlMember(Alias = "writePath", ApplyNamingConventions = false)]
+    public string WritePath { get; init; } = "/";
+
+    // Legacy’den yeni path’e sessiz taşıma için işaret (ileride delete-legacy eklenebilir)
+    [YamlMember(Alias = "migrate", ApplyNamingConventions = false)]
+    public bool? Migrate { get; init; } = false;
 }

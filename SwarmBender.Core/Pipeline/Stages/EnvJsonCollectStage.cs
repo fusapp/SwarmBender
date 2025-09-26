@@ -122,14 +122,14 @@ namespace SwarmBender.Core.Pipeline.Stages
 
                 case JsonValueKind.String:
                     if (!string.IsNullOrEmpty(prefix))
-                        EmitBoth(prefix, el.GetString() ?? string.Empty, sink);
+                        EmitDouble(prefix, el.GetString() ?? string.Empty, sink);
                     break;
 
                 case JsonValueKind.Number:
                 case JsonValueKind.True:
                 case JsonValueKind.False:
                     if (!string.IsNullOrEmpty(prefix))
-                        EmitBoth(prefix, el.ToString(), sink);
+                        EmitDouble(prefix, el.ToString(), sink);
                     break;
 
                 case JsonValueKind.Null:
@@ -138,14 +138,13 @@ namespace SwarmBender.Core.Pipeline.Stages
                     break;
             }
         }
-
-        private static void EmitBoth(string dottedKey, string value, IDictionary<string, string> sink)
+        
+        private static void EmitDouble(string dottedKey, string value, IDictionary<string, string> sink)
         {
-            // A.B.C
-            sink[dottedKey] = value;
-
-            // A__B__C (safe join, no accidental underscore doubling)
-            var dd = string.Join("__", dottedKey.Split('.', StringSplitOptions.RemoveEmptyEntries));
+            if (string.IsNullOrEmpty(dottedKey)) return;
+            // Sadece A__B__C üret
+            var dd = dottedKey.Replace('.', '_'); // A_B_C
+            dd = dd.Replace("_", "__");           // A__B__C
             sink[dd] = value;
         }
     }

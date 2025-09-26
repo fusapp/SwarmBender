@@ -1,63 +1,37 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Spectre.Console.Cli;
-using SwarmBender.Cli.Infrastructure;
+using SwarmBender.Cli;
 using SwarmBender.Cli.Commands;
-using SwarmBender.Cli.Commands.Secrets;
-using SwarmBender.Cli.Commands.Utils;
-using SwarmBender.Cli.Commands.Utils.Azdo;
-using SwarmBender.Cli.Commands.Utils.Infisical;
-using SwarmBender.Services;
-using SwarmBender.Services.Abstractions;
+using SwarmBender.Core;
+using SwarmBender.Core.Abstractions;
 
-var services = new ServiceCollection();
+var services = new ServiceCollection()
+    .AddSwarmBenderCore(Directory.GetCurrentDirectory())
+    .AddSingleton<IOutput,ConsoleOutput>()
+    ;
 
-// Core services
-services.AddSingleton<IInitExecutor, InitExecutor>();
-services.AddSingleton<IFileSystem, FileSystem>();
-services.AddSingleton<IEnvParser, EnvParser>();
-services.AddSingleton<IStubContent, StubContent>();
-services.AddSingleton<IValidator, Validator>();
-services.AddSingleton<IYamlLoader, YamlLoader>();
-services.AddSingleton<IRenderExecutor, RenderExecutor>(); // NEW
-services.AddSwarmBenderSecrets();
-
-var registrar = new TypeRegistrar(services);
-var app = new CommandApp(registrar);
-
+var app = new CommandApp(new SwarmBenderTypeRegistrar(services));
 app.Configure(cfg =>
 {
     cfg.SetApplicationName("sb");
-    cfg.UseAssemblyInformationalVersion();
-    cfg.AddCommand<InitCommand>("init")
-       .WithDescription("Initialize project root or a specific stack scaffold.");
-    cfg.AddCommand<ValidateCommand>("validate")
-       .WithDescription("Validate a stack (or all stacks) against policies and basic schema.");
-    cfg.AddCommand<RenderCommand>("render")
-       .WithDescription("Render final stack.yml for one or more environments.");
-    cfg.AddSecretsCommands();
-    cfg.AddBranch("meta", meta =>
+    cfg.AddCommand<InitCommand>("init");
+    cfg.AddCommand<RenderCommand>("render");
+    cfg.AddBranch("secret", b =>
     {
-       meta.AddCommand<SwarmBender.Cli.Commands.Meta.MetaValidateCommand>("validate")
-          .WithDescription("Validate metadata/tenants.yml and metadata/groups.yml against built-in schema.");
+        b.AddCommand<SecretListCommand>("list");
+        b.AddCommand<SecretSyncCommand>("sync");
+        b.AddCommand<SecretPruneCommand>("prune");
+        b.AddCommand<SecretDiffCommand>("diff");
     });
-    cfg.AddBranch("utils", utils =>
+
+    // (opsiyonel) utils/infisical
+    cfg.AddBranch("utils", b =>
     {
-       utils.AddCommand<UtilsCommand>("utils");
-       utils.AddBranch("infisical", inf =>
-       {
-          inf.AddCommand<InfisicalUploadCommand>("upload");
-          inf.AddCommand<InfisicalInitCommand>("init");
-       });
-       
-       utils.AddBranch("azdo", azdo =>
-       {
-          azdo.AddBranch("pipeline", pipeline =>
-          {
-             pipeline.AddCommand<AzdoPipelineInitCommand>("init");
-          });
-       });
-       
+        b.AddBranch("infisical", i =>
+        {
+            i.AddCommand<InfisicalUploadCommand>("upload").WithDescription("Upload discovered secrets to Infisical using SDK.");
+        });
     });
 });
 
-return app.Run(args);
+return await app.RunAsync(args);

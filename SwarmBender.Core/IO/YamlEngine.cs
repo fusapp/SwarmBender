@@ -44,6 +44,11 @@ public sealed class YamlEngine : IYamlEngine
     public string DumpFromMap(IDictionary<string, object?> map)
         => _s.Serialize(map);
 
+    public Task<string> DumpYamlAsync<T>(T data)
+    {
+        return Task.FromResult(_s.Serialize(data));
+    }
+
     private static IDictionary<string, object?> ToDict(object? node)
     {
         if (node is IDictionary<object, object?> dict)

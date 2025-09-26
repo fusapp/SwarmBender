@@ -8,12 +8,9 @@ namespace SwarmBender.Core.Providers.Azure;
 /// </summary>
 public interface IAzureKvCollector
 {
-    public interface IAzureKvCollector
-    {
-        // Eski: CollectAsync(SbConfig.ProvidersSection.AzureKv cfg, ...)
-        Task<Dictionary<string, string>> CollectAsync(
-            ProvidersAzureKv cfg,
-            string env,
-            CancellationToken ct);
-    }
+    // Eski: CollectAsync(SbConfig.ProvidersSection.AzureKv cfg, ...)
+    Task<Dictionary<string, string>> CollectAsync(
+        ProvidersAzureKv cfg,
+        string env,
+        CancellationToken ct);
 }

@@ -3,6 +3,7 @@ using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Config;
 using SwarmBender.Core.IO;
 using SwarmBender.Core.Pipeline;
+using SwarmBender.Core.Pipeline.Stages;
 using SwarmBender.Core.Providers.Azure;
 using SwarmBender.Core.Providers.Infisical;
 
@@ -30,15 +31,15 @@ public static class ServiceCollectionExtensions
 
         // Orchestrator + stages
         services.AddSingleton<IRenderOrchestrator, RenderOrchestrator>();
-        // services.AddSingleton<IRenderStage, TemplateLoaderStage>();
-        // services.AddSingleton<IRenderStage, ApplyOverlaysStage>();
-        // services.AddSingleton<IRenderStage, EnvJsonCollectStage>();
-        // services.AddSingleton<IRenderStage, ProvidersAggregateStage>();
-        // services.AddSingleton<IRenderStage, EnvironmentApplyStage>();
-        // services.AddSingleton<IRenderStage, LabelsStage>();
-        // services.AddSingleton<IRenderStage, SecretsAttachStage>();
-        // services.AddSingleton<IRenderStage, TokenExpandStage>();
-        // services.AddSingleton<IRenderStage, SerializeStage>();
+        services.AddSingleton<IRenderStage, LoadTemplateStage>();
+        services.AddSingleton<IRenderStage, ApplyOverlaysStage>();
+        services.AddSingleton<IRenderStage, EnvJsonCollectStage>();
+        services.AddSingleton<IRenderStage, ProvidersAggregateStage>();
+        services.AddSingleton<IRenderStage, EnvironmentApplyStage>();
+        services.AddSingleton<IRenderStage, LabelsStage>();
+        services.AddSingleton<IRenderStage, SecretsAttachStage>();
+        services.AddSingleton<IRenderStage, TokenExpandStage>();
+        services.AddSingleton<IRenderStage, SerializeStage>();
 
         return services;
     }

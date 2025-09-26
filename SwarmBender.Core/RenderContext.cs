@@ -17,6 +17,7 @@ public sealed class RenderContext
     // Yol kısayolları
     public required string RootPath { get; init; }            // Request.RootPath
     public required string StacksDir { get; init; }           // {root}/stacks
+    public string? TemplatePath { get; set; }          
     public required string OpsDir { get; init; }              // {root}/ops
     public required string OutputDir { get; init; }           // {root}/{OutDir}
 
@@ -33,13 +34,25 @@ public sealed class RenderContext
 
     /// <summary>Provider’lardan gelen gizli veriler (ProvidersAggregate → SecretsAttach akışı)</summary>
     public Dictionary<string, string> SecretsBag { get; } = new(StringComparer.OrdinalIgnoreCase);
+    
+    // Holds flattened environment variables aggregated from env/*.json files.
+    public Dictionary<string, string> Env { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     // Çıktı/sonuç
     public string? OutFilePath { get; set; }      // SerializeStage doldurur
     public string? HistoryFilePath { get; set; }  // SerializeStage doldurur
+    
+    /// <summary>
+    /// Full configuration (from ops/sb.yml).
+    /// </summary>
+    public required SbConfig Config { get; init; }
 
     // Yardımcı oluşturucu
-    public static RenderContext Create(RenderRequest req, IFileSystem fs, IYamlEngine yaml)
+    public static RenderContext Create(
+        RenderRequest req,
+        IFileSystem fs,
+        IYamlEngine yaml,
+        SbConfig config)
     {
         var root      = req.RootPath;
         var stacks    = System.IO.Path.Combine(root, "stacks");
@@ -50,13 +63,14 @@ public sealed class RenderContext
 
         return new RenderContext
         {
-            Request   = req,
-            FileSystem= fs,
-            Yaml      = yaml,
-            RootPath  = root,
-            StacksDir = stacks,
-            OpsDir    = ops,
-            OutputDir = outDirAbs
+            Request    = req,
+            FileSystem = fs,
+            Yaml       = yaml,
+            RootPath   = root,
+            StacksDir  = stacks,
+            OpsDir     = ops,
+            OutputDir  = outDirAbs,
+            Config     = config
         };
     }
 }

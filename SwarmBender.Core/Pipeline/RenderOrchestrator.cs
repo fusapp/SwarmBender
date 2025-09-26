@@ -1,4 +1,5 @@
 using SwarmBender.Core.Abstractions;
+using SwarmBender.Core.Config;
 using SwarmBender.Core.Data.Models;
 
 namespace SwarmBender.Core.Pipeline;
@@ -9,24 +10,25 @@ public sealed class RenderOrchestrator : IRenderOrchestrator
     private readonly IEnumerable<IRenderStage> _stages;
     private readonly IFileSystem _fs;
     private readonly IYamlEngine _yaml;
-    private readonly SbConfig _config;
+    private readonly ISbConfigLoader _configLoader;
 
     public RenderOrchestrator(
         IEnumerable<IRenderStage> stages,
         IFileSystem fs,
         IYamlEngine yaml,
-        SbConfig config)
+        ISbConfigLoader configLoader)
     {
-        _stages = stages.ToArray();
+        _stages = stages.OrderBy(x=>x.Order).ToArray();
         _fs = fs;
         _yaml = yaml;
-        _config = config;
+        _configLoader = configLoader;
     }
 
     public async Task<RenderResult> RunAsync(RenderRequest request, CancellationToken ct = default)
     {
     
-        var ctx = RenderContext.Create(request, _fs, _yaml);
+        var config = await _configLoader.LoadAsync(request.RootPath, ct);
+        var ctx = RenderContext.Create(request, _fs, _yaml, config);
 
      
         _fs.EnsureDirectory(ctx.OutputDir);

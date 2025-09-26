@@ -9,10 +9,11 @@ namespace SwarmBender.Core.Pipeline.Stages
 {
     /// <summary>
     /// Normalizes and enriches service deploy.labels:
-    /// - Ensures labels exist in map form (KEY -> VALUE).
-    /// - Merges root-level x-sb.labels (global) into every service (first).
-    /// - Merges service-level x-sb.labels (overrides global on conflicts).
-    /// Merge policy: last-wins.
+    /// - Ensures labels exist.
+    /// - Merges root-level x-sb.labels (global) first.
+    /// - Then merges service-level x-sb.labels (overrides global).
+    /// - Merge policy: last-wins.
+    /// Writes back in **list style** ("- key=value") to preserve compose list syntax.
     /// </summary>
     public sealed class LabelsStage : IRenderStage
     {
@@ -36,7 +37,8 @@ namespace SwarmBender.Core.Pipeline.Stages
                 ct.ThrowIfCancellationRequested();
 
                 svc.Deploy ??= new Deploy();
-                // Normalize current labels to a dict
+
+                // Current labels (list or map) -> dict
                 var current = ToDictionary(svc.Deploy.Labels);
 
                 // 1) apply global labels first
@@ -48,18 +50,31 @@ namespace SwarmBender.Core.Pipeline.Stages
                 foreach (var kv in svcLabels)
                     current[kv.Key] = kv.Value;
 
-                // write back as map
-                svc.Deploy.Labels = ListOrDict.FromMap(
-                    new Dictionary<string, string>(current, StringComparer.OrdinalIgnoreCase));
+                // Write back as **list** ("key=value"), deterministic order for stable diffs
+                var list = new List<string>();
+                foreach (var kv in Sorted(current))
+                {
+                    if (string.IsNullOrEmpty(kv.Value))
+                        list.Add(kv.Key);
+                    else
+                        list.Add($"{kv.Key}={kv.Value}");
+                }
+
+                svc.Deploy.Labels = ListOrDict.FromList(list);
             }
 
             return Task.CompletedTask;
         }
 
+        private static IEnumerable<KeyValuePair<string, string>> Sorted(Dictionary<string, string> dict)
+            => dict is null
+                ? Array.Empty<KeyValuePair<string, string>>()
+                : new SortedDictionary<string, string>(dict, StringComparer.OrdinalIgnoreCase);
+
         /// <summary>
         /// Extracts x-sb.labels map from a ComposeNode.Custom if present.
         /// Expected structure:
-        ///   node.Custom["x-sb"] as Dictionary<string,object?> containing
+        ///   node.Custom["x-sb"] as Dictionary&lt;string,object?&gt; containing
         ///   "labels" as Dictionary&lt;string,object?&gt; (values stringified).
         /// </summary>
         private static Dictionary<string, string> ReadXsBLabels(ComposeNode node)

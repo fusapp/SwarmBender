@@ -62,11 +62,11 @@ public sealed class TokensSection
 public sealed class SecretizeSection
 {
     [YamlMember(Alias = "enabled", ApplyNamingConventions = false)]
-    public bool Enabled { get; init; } = true;
+    public bool Enabled { get; set; } = true;
 
     // flatten edilmiş anahtar desenleri (glob)
     [YamlMember(Alias = "paths", ApplyNamingConventions = false)]
-    public List<string> Paths { get; init; } = new();
+    public List<string> Paths { get; set; } = new();
 }
 
 // --- secrets ---
@@ -112,7 +112,7 @@ public sealed class ProvidersSection
 {
     // Kaynak sırası
     [YamlMember(Alias = "order", ApplyNamingConventions = false)]
-    public List<ProviderOrderItem> Order { get; init; } = new()
+    public List<ProviderOrderItem> Order { get; set; } = new()
     {
         new() { Type = "file" },
         new() { Type = "env" },
@@ -127,10 +127,10 @@ public sealed class ProvidersSection
     public ProvidersEnv Env { get; init; } = new();
 
     [YamlMember(Alias = "azure-kv", ApplyNamingConventions = false)]
-    public ProvidersAzureKv AzureKv { get; init; } = new();
+    public ProvidersAzureKv AzureKv { get; set; } = new();
 
     [YamlMember(Alias = "infisical", ApplyNamingConventions = false)]
-    public ProvidersInfisical Infisical { get; init; } = new();
+    public ProvidersInfisical Infisical { get; set; } = new();
 }
 
 public sealed class ProviderOrderItem

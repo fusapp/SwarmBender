@@ -51,6 +51,7 @@ namespace SwarmBender.Core.Pipeline.Stages
 
                 foreach (var key in matchedKeys)
                 {
+                    
                     var value = envMap[key] ?? string.Empty;
 
                     var versionSuffix =
@@ -85,6 +86,21 @@ namespace SwarmBender.Core.Pipeline.Stages
                     });
 
                     // Remove plain env value (do not leak)
+                    
+                    svc.Secrets ??= new List<ServiceSecretRef>();
+                    bool alreadyAttached = svc.Secrets.Exists(s =>
+                        s.Source.Equals(externalName, StringComparison.OrdinalIgnoreCase));
+
+                    if (!alreadyAttached)
+                    {
+                        svc.Secrets.Add(new ServiceSecretRef
+                        {
+                            Source = externalName,
+                            Target = null,
+                            Mode = 288 // 0440
+                        });
+                    }
+
                     envMap.Remove(key);
                 }
 

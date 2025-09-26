@@ -16,7 +16,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// <summary>
     /// Enriches ctx.Env by aggregating from providers in the configured order:
     ///   file (already handled by EnvJsonCollectStage) -> env -> azure-kv -> infisical
-    /// Each provider merges with last-wins semantics.
+    /// Providers merge with last-wins semantics.
     /// </summary>
     public sealed class ProvidersAggregateStage : IRenderStage
     {
@@ -26,10 +26,7 @@ namespace SwarmBender.Core.Pipeline.Stages
         private readonly IAzureKvCollector _kv;
         private readonly IInfisicalCollector _inf;
 
-        public ProvidersAggregateStage(
-            IFileSystem fs,
-            IAzureKvCollector kv,
-            IInfisicalCollector inf)
+        public ProvidersAggregateStage(IFileSystem fs, IAzureKvCollector kv, IInfisicalCollector inf)
         {
             _fs = fs;
             _kv = kv;
@@ -38,10 +35,8 @@ namespace SwarmBender.Core.Pipeline.Stages
 
         public async Task ExecuteAsync(RenderContext ctx, CancellationToken ct)
         {
-            // Ensure env bag exists
             var envBag = ctx.Env;
 
-            // Determine provider order from config or fallback
             var order = ctx.Config?.Providers?.Order?.Select(o => o.Type)?.ToList();
             if (order is null || order.Count == 0)
                 order = new List<string> { "file", "env", "azure-kv", "infisical" };
@@ -53,11 +48,11 @@ namespace SwarmBender.Core.Pipeline.Stages
                 switch (type.Trim().ToLowerInvariant())
                 {
                     case "file":
-                        // Already applied by EnvJsonCollectStage (kept for clarity).
+                        // Already collected at EnvJsonCollectStage
                         break;
 
                     case "env":
-                        MergeFromProcessEnvironment(ctx, envBag);
+                        await MergeFromProcessEnvironmentAsync(ctx, envBag, ct).ConfigureAwait(false);
                         break;
 
                     case "azure-kv":
@@ -81,57 +76,62 @@ namespace SwarmBender.Core.Pipeline.Stages
                         break;
 
                     default:
-                        // Unknown provider name: ignore gracefully.
+                        // Unknown provider: ignore
                         break;
                 }
             }
         }
 
         /// <summary>
-        /// Reads OS environment variables and merges an allow-listed subset into ctx.Env.
-        /// Allowlist patterns are gathered from files defined in:
-        ///   config.providers.env.allowlistFileSearch (supports {stackId}/{env} tokens, globbed via IFileSystem).
-        /// Patterns are simple wildcards, e.g., "ConnectionStrings__*", "REDIS_*".
+        /// Reads OS env vars, filters by allowlist patterns gathered from configured files,
+        /// and merges matches into envBag (last-wins).
         /// </summary>
-        private void MergeFromProcessEnvironment(RenderContext ctx, Dictionary<string, string> envBag)
+        private async Task MergeFromProcessEnvironmentAsync(RenderContext ctx, Dictionary<string, string> envBag, CancellationToken ct)
         {
-            // Collect allowlist patterns from configured files (JSON array of strings).
-            var patterns = new List<string>();
+            var patterns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             var search = ctx.Config?.Providers?.Env?.AllowlistFileSearch;
             if (search is { Count: > 0 })
             {
                 foreach (var patt in search)
                 {
+                    ct.ThrowIfCancellationRequested();
+
                     var resolved = patt
                         .Replace("{stackId}", ctx.Request.StackId, StringComparison.OrdinalIgnoreCase)
                         .Replace("{env}",     ctx.Request.Env,     StringComparison.OrdinalIgnoreCase);
 
-                    foreach (var file in _fs.GlobFiles(ctx.RootPath, resolved))
+                    // Glob returns repo-root relative paths (our IFileSystem contract),
+                    // but be defensive if absolute leaks in.
+                    var files = _fs.GlobFiles(ctx.RootPath, resolved)
+                                   .OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var f in files)
                     {
-                        // Each file is expected to be a JSON array of strings (patterns)
-                        var full = Path.Combine(ctx.RootPath, file);
-                        var json = _fs.ReadAllTextAsync(full, CancellationToken.None).GetAwaiter().GetResult();
+                        var abs = Path.IsPathRooted(f) ? f : Path.Combine(ctx.RootPath, f);
+
                         try
                         {
+                            var json = await _fs.ReadAllTextAsync(abs, ct).ConfigureAwait(false);
                             var arr = JsonSerializer.Deserialize<string[]>(json);
-                            if (arr is not null)
-                                patterns.AddRange(arr.Where(s => !string.IsNullOrWhiteSpace(s)));
+                            if (arr is null) continue;
+
+                            foreach (var s in arr)
+                                if (!string.IsNullOrWhiteSpace(s))
+                                    patterns.Add(s);
                         }
                         catch
                         {
-                            // Ignore malformed files; we prefer robustness over failure here.
+                            // Ignore malformed or missing files to keep CLI robust
                         }
                     }
                 }
             }
 
-            // If no patterns defined, there's nothing to import from OS env.
             if (patterns.Count == 0) return;
 
-            // Convert wildcard patterns to compiled regex for case-insensitive matching.
             var regexes = patterns.Select(WildcardToRegex).ToArray();
 
-            // Enumerate process env vars and include only allow-listed ones.
             var proc = Environment.GetEnvironmentVariables();
             foreach (DictionaryEntry de in proc)
             {
@@ -139,19 +139,12 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var val = de.Value?.ToString() ?? string.Empty;
 
                 if (regexes.Any(rx => rx.IsMatch(key)))
-                {
                     envBag[key] = val; // last-wins
-                }
             }
         }
 
-        /// <summary>
-        /// Converts a simple wildcard pattern to case-insensitive Regex.
-        /// Supports '*' (zero or more chars) and '?' (single char).
-        /// </summary>
         private static Regex WildcardToRegex(string pattern)
         {
-            // Escape regex meta, then re-introduce wildcards.
             var escaped = Regex.Escape(pattern)
                                .Replace(@"\*", ".*")
                                .Replace(@"\?", ".");

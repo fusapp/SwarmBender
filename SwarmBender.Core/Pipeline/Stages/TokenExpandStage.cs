@@ -1,23 +1,16 @@
-using System;
-using System.Collections.Generic;
+using System.Collections;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
 using SwarmBender.Core.Data.Models;
+using SecretModel = SwarmBender.Core.Data.Compose.Secret;
 
 namespace SwarmBender.Core.Pipeline.Stages
 {
     /// <summary>
-    /// Expands token placeholders on the typed compose model according to the latest Service schema.
+    /// Expands token placeholders on the typed compose model.
     /// Supported patterns: ${NAME} and {{NAME}}.
     /// Sources: SB_* defaults + config.tokens.user (user overrides).
-    /// Fields covered:
-    /// - service: image, command, entrypoint, environment, labels, env_file, dns, dns_search,
-    ///            user, working_dir, stop_grace_period, stop_signal,
-    ///            devices, tmpfs, cap_add, cap_drop, profiles, dns_opt
-    /// - deploy.labels (if present)
     /// </summary>
     public sealed class TokenExpandStage : IRenderStage
     {
@@ -28,8 +21,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             if (ctx.Working is null)
                 throw new InvalidOperationException("Working model is null. LoadTemplateStage must run before TokenExpandStage.");
 
-            var tokens = BuildTokens(ctx);
-
+            var baseTokens = BuildTokens(ctx);
             var svcs = ctx.Working.Services;
             if (svcs is null || svcs.Count == 0)
                 return Task.CompletedTask;
@@ -38,21 +30,27 @@ namespace SwarmBender.Core.Pipeline.Stages
             {
                 ct.ThrowIfCancellationRequested();
 
-                // string fields
-                svc.Image          = ReplaceTokens(svc.Image, tokens);
-                svc.User           = ReplaceTokens(svc.User, tokens);
-                svc.WorkingDir     = ReplaceTokens(svc.WorkingDir, tokens);
-                svc.StopGracePeriod= ReplaceTokens(svc.StopGracePeriod, tokens);
-                svc.StopSignal     = ReplaceTokens(svc.StopSignal, tokens);
+                // add per-service implicit token
+                var tokens = new Dictionary<string, string>(baseTokens, StringComparer.OrdinalIgnoreCase)
+                {
+                    ["SB_SERVICE_NAME"] = svcName
+                };
 
-                // ListOrString fields
+                // simple strings
+                svc.Image           = ReplaceTokens(svc.Image, tokens);
+                svc.User            = ReplaceTokens(svc.User, tokens);
+                svc.WorkingDir      = ReplaceTokens(svc.WorkingDir, tokens);
+                svc.StopGracePeriod = ReplaceTokens(svc.StopGracePeriod, tokens);
+                svc.StopSignal      = ReplaceTokens(svc.StopSignal, tokens);
+
+                // list-or-string fields
                 ExpandListOrString(svc.Command, tokens);
                 ExpandListOrString(svc.Entrypoint, tokens);
                 ExpandListOrString(svc.EnvFile, tokens);
                 ExpandListOrString(svc.Dns, tokens);
                 ExpandListOrString(svc.DnsSearch, tokens);
 
-                // List<string> fields
+                // list<string> fields
                 ExpandStringList(svc.Devices, tokens);
                 ExpandStringList(svc.Tmpfs, tokens);
                 ExpandStringList(svc.CapAdd, tokens);
@@ -60,22 +58,105 @@ namespace SwarmBender.Core.Pipeline.Stages
                 ExpandStringList(svc.Profiles, tokens);
                 ExpandStringList(svc.DnsOpt, tokens);
 
-                // ListOrDict fields
+                // list-or-dict fields
                 ExpandListOrDict(svc.Environment, tokens);
                 ExpandListOrDict(svc.Labels, tokens);
 
-                // deploy.labels (dictionary)
+                // deploy.labels (dictionary wrapped in ListOrDict)
                 if (svc.Deploy?.Labels is not null)
                     ExpandListOrDict(svc.Deploy.Labels, tokens);
 
-                // NOTE: We can extend to Healthcheck, Logging.Options, ExtraHosts, Sysctls, Ulimits later if needed.
+                // logging
+                if (svc.Logging is not null)
+                {
+                    svc.Logging.Driver = ReplaceTokens(svc.Logging.Driver, tokens);
+                    if (svc.Logging.Options is not null)
+                    {
+                        var opts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var (k, v) in svc.Logging.Options)
+                            opts[ReplaceTokens(k, tokens) ?? k] = ReplaceTokens(v, tokens) ?? v;
+                        svc.Logging.Options = opts;
+                    }
+                }
+
+                // healthcheck
+                if (svc.Healthcheck is not null)
+                {
+                    ExpandListOrString(svc.Healthcheck.Test, tokens);
+                    svc.Healthcheck.Interval    = ReplaceTokens(svc.Healthcheck.Interval, tokens);
+                    svc.Healthcheck.Timeout     = ReplaceTokens(svc.Healthcheck.Timeout, tokens);
+                    svc.Healthcheck.StartPeriod = ReplaceTokens(svc.Healthcheck.StartPeriod, tokens);
+                }
+
+                // volumes (mounts) – only textual fields that exist
+                if (svc.Volumes is not null)
+                {
+                    foreach (var m in svc.Volumes)
+                    {
+                        m.Source = ReplaceTokens(m.Source, tokens);
+                        m.Target = ReplaceTokens(m.Target, tokens);
+                        // m.Type vb. varsa string ise burada genişletilebilir; SubPath yok.
+                    }
+                }
+
+                // ports – expand textual fields only (no Name in PortMapping)
+                if (svc.Ports is not null)
+                {
+                    foreach (var p in svc.Ports)
+                    {
+                        p.Protocol = ReplaceTokens(p.Protocol, tokens);
+                        p.Mode     = ReplaceTokens(p.Mode, tokens);
+                    }
+                }
+
+                // secret refs
+                if (svc.Secrets is not null)
+                {
+                    foreach (var r in svc.Secrets)
+                    {
+                        r.Source = ReplaceTokens(r.Source, tokens);
+                        r.Target = ReplaceTokens(r.Target, tokens);
+                    }
+                }
+
+                // config refs
+                if (svc.Configs is not null)
+                {
+                    foreach (var r in svc.Configs)
+                    {
+                        r.Source = ReplaceTokens(r.Source, tokens);
+                        r.Target = ReplaceTokens(r.Target, tokens);
+                    }
+                }
+
+                // x-sb / custom blocks (in place)
+                ExpandCustomBlockInPlace(svc, tokens);
             }
+
+            // root-level secrets: rename keys + expand string fields
+            if (ctx.Working.Secrets is { Count: > 0 })
+            {
+                var newMap = new Dictionary<string, SecretModel>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (name, sec) in ctx.Working.Secrets)
+                {
+                    var newName = ReplaceTokens(name, baseTokens) ?? name;
+                    ExpandCustomBlockInPlace(sec, baseTokens);
+                    sec.Name            = ReplaceTokens(sec.Name, baseTokens);
+                    sec.File            = ReplaceTokens(sec.File, baseTokens);
+                    if (sec.External is not null)
+                        sec.External.Name = ReplaceTokens(sec.External.Name, baseTokens);
+                    newMap[newName] = sec;
+                }
+                ctx.Working.Secrets = newMap;
+            }
+
+            // root-level custom
+            ExpandCustomBlockInPlace(ctx.Working, baseTokens);
 
             return Task.CompletedTask;
         }
 
-        // ---------------- helpers ----------------
-
+        // ------------ helpers ------------
         private static Dictionary<string, string> BuildTokens(RenderContext ctx)
         {
             var bag = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -83,30 +164,25 @@ namespace SwarmBender.Core.Pipeline.Stages
                 ["SB_STACK_ID"] = ctx.Request.StackId,
                 ["SB_ENV"]      = ctx.Request.Env,
             };
-
-            var user = ctx.Config?.Tokens?.User;
-            if (user is { Count: > 0 })
-            {
-                foreach (var kv in user)
+            if (ctx.Config?.Tokens?.User is { Count: > 0 })
+                foreach (var kv in ctx.Config.Tokens.User)
                     if (!string.IsNullOrWhiteSpace(kv.Key))
                         bag[kv.Key] = kv.Value ?? string.Empty;
-            }
             return bag;
         }
 
         private static void ExpandListOrString(ListOrString? los, IDictionary<string,string> tokens)
         {
             if (los is null) return;
-
             if (los.AsList is not null)
             {
                 for (int i = 0; i < los.AsList.Count; i++)
                     los.AsList[i] = ReplaceTokens(los.AsList[i], tokens);
-                return;
             }
-
-            if (los.AsString is not null)
+            else if (los.AsString is not null)
+            {
                 los.AsString = ReplaceTokens(los.AsString, tokens);
+            }
         }
 
         private static void ExpandListOrDict(ListOrDict? lod, IDictionary<string,string> tokens)
@@ -118,15 +194,10 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var map = lod.AsMap;
                 var keys = new List<string>(map.Keys);
                 foreach (var k in keys)
-                {
                     map[k] = ReplaceTokens(map[k], tokens);
-                }
-                return;
             }
-
-            if (lod.AsList is not null)
+            else if (lod.AsList is not null)
             {
-                // items like "KEY=VALUE" or bare keys
                 var list = lod.AsList;
                 for (int i = 0; i < list.Count; i++)
                 {
@@ -136,24 +207,16 @@ namespace SwarmBender.Core.Pipeline.Stages
                     var eq = item.IndexOf('=', StringComparison.Ordinal);
                     if (eq < 0)
                     {
-                        list[i] = ReplaceTokens(item, tokens); // bare item can still have tokens
+                        list[i] = ReplaceTokens(item, tokens);
                     }
                     else
                     {
                         var key = item[..eq];
                         var val = item[(eq + 1)..];
-                        list[i] = key + "=" + ReplaceTokens(val, tokens);
+                        list[i] = key + "=" + (ReplaceTokens(val, tokens) ?? val);
                     }
                 }
             }
-        }
-
-        private static void ExpandStringDictionary(Dictionary<string,string>? map, IDictionary<string,string> tokens)
-        {
-            if (map is null) return;
-            var keys = new List<string>(map.Keys);
-            foreach (var k in keys)
-                map[k] = ReplaceTokens(map[k], tokens);
         }
 
         private static void ExpandStringList(List<string>? list, IDictionary<string,string> tokens)
@@ -162,6 +225,34 @@ namespace SwarmBender.Core.Pipeline.Stages
             for (int i = 0; i < list.Count; i++)
                 list[i] = ReplaceTokens(list[i], tokens);
         }
+
+        // mutate ComposeNode.Custom in place (property is read-only)
+        private static void ExpandCustomBlockInPlace(ComposeNode node, IDictionary<string,string> tokens)
+        {
+            if (node.Custom is null || node.Custom.Count == 0) return;
+            var expanded = ExpandObject(node.Custom, tokens);
+            node.Custom.Clear();
+            foreach (var kv in expanded)
+                node.Custom[kv.Key] = kv.Value;
+        }
+
+        private static IDictionary<string, object?> ExpandObject(IDictionary<string, object?> obj, IDictionary<string,string> tokens)
+        {
+            var res = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in obj)
+                res[ReplaceTokens(k, tokens) ?? k] = ExpandValue(v, tokens);
+            return res;
+        }
+
+        private static object? ExpandValue(object? v, IDictionary<string,string> tokens)
+            => v switch
+            {
+                null => null,
+                string s => ReplaceTokens(s, tokens),
+                IDictionary<string, object?> map => ExpandObject(map, tokens),
+                IEnumerable list => list.Cast<object?>().Select(x => ExpandValue(x, tokens)).ToList(),
+                _ => v
+            };
 
         // Supports ${NAME} and {{NAME}}
         private static readonly Regex RxDollar = new(@"\$\{([A-Za-z0-9_]+)\}", RegexOptions.Compiled);
@@ -172,17 +263,9 @@ namespace SwarmBender.Core.Pipeline.Stages
             if (string.IsNullOrEmpty(input)) return input;
 
             static string Expand(Regex rx, string s, IDictionary<string,string> tks)
-            {
-                return rx.Replace(s, m =>
-                {
-                    var key = m.Groups[1].Value;
-                    return tks.TryGetValue(key, out var val) ? (val ?? string.Empty) : m.Value;
-                });
-            }
+                => rx.Replace(s, m => tks.TryGetValue(m.Groups[1].Value, out var val) ? (val ?? string.Empty) : m.Value);
 
-            var s1 = Expand(RxDollar, input!, tokens);
-            var s2 = Expand(RxBraces, s1, tokens);
-            return s2;
+            return Expand(RxBraces, Expand(RxDollar, input!, tokens), tokens);
         }
     }
 }

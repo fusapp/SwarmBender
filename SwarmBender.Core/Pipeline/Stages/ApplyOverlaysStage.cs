@@ -7,15 +7,16 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using SwarmBender.Core.Abstractions;
-using SwarmBender.Core.Data.Compose; // ComposeFile (root model)
-using SwarmBender.Core.Util; // DeepMerge
+using SwarmBender.Core.Data.Compose;
 
 namespace SwarmBender.Core.Pipeline.Stages
 {
     /// <summary>
-    /// Applies overlays using contract-configured order (SbConfig.Render.OverlayOrder),
-    /// or falls back to defaults if not provided. Files are applied in ascending
-    /// alphabetical order per glob; last applied wins on collisions.
+    /// Applies overlays in a configurable order:
+    ///  - Expands wildcard ("*") service overlay to all services (deep-merge).
+    ///  - Deep-merges named services in overlay into working model (last wins).
+    ///  - Shallow-merges all top-level nodes EXCEPT Services (Services are handled above).
+    /// Files are applied in the order they are discovered for each pattern; last applied wins.
     /// </summary>
     public sealed class ApplyOverlaysStage : IRenderStage
     {
@@ -37,9 +38,9 @@ namespace SwarmBender.Core.Pipeline.Stages
                     "Working model is null. LoadTemplateStage must run before ApplyOverlaysStage.");
 
             var stackId = ctx.Request.StackId;
-            var env = ctx.Request.Env;
+            var env     = ctx.Request.Env;
 
-            // 1) Overlay order from config; fallback to defaults
+            // 1) Get overlay order from config; fallback to defaults
             var patterns = (ctx.Config?.Render?.OverlayOrder is { Count: > 0 } configured)
                 ? configured
                 : new List<string>
@@ -54,7 +55,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             {
                 var resolved = patt
                     .Replace("{stackId}", stackId, StringComparison.OrdinalIgnoreCase)
-                    .Replace("{env}", env, StringComparison.OrdinalIgnoreCase);
+                    .Replace("{env}",     env,     StringComparison.OrdinalIgnoreCase);
 
                 foreach (var mask in ExpandMasks(resolved))
                 {
@@ -71,29 +72,34 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var overlay = await _yaml.LoadYamlAsync<ComposeFile>(file, ct).ConfigureAwait(false);
                 if (overlay is null) continue;
 
-                // 3a) Spread wildcard ("*") service overlay onto each concrete service
-                ApplyWildcardServicesOverlay(ctx.Working, overlay);
+                // 3a) Spread wildcard ("*") service overlay onto each concrete service (deep-merge)
+                ApplyWildcardServicesOverlay(ctx.Working!, overlay);
 
-                // 3b) Shallow merge top-level nodes (services/configs/secrets/networks/volumes, vb.)
-                ShallowTopLevelMerge(ctx.Working, overlay);
+                // 3b) Deep-merge named services (skip "*")
+                MergeNamedServices(ctx.Working!, overlay);
 
-                // (opsiyonel) applied listesi tutuluyorsa ekle:
+                // 3c) Shallow top-level merge for everything EXCEPT Services
+                ShallowTopLevelMergeExceptServices(ctx.Working!, overlay);
+
+                // If you keep an "applied files" list on context, append here.
                 // ctx.AppliedOverlays?.Add(file);
             }
         }
 
-        // Supports "*.y?(a)ml" by expanding to both *.yml and *.yaml.
-// Returns masks relative to repo root so that IFileSystem.GlobFiles(root, mask) çalışsın.
+        // --- helpers ---------------------------------------------------------
+
+        /// <summary>
+        /// Supports "*.y?(a)ml" by expanding to both *.yml and *.yaml masks (relative to repo root).
+        /// </summary>
         private static IEnumerable<string> ExpandMasks(string mask)
         {
             if (mask.Contains("y?(a)ml", StringComparison.OrdinalIgnoreCase))
             {
-                yield return mask.Replace("y?(a)ml", "yml");
-                yield return mask.Replace("y?(a)ml", "yaml");
+                yield return mask.Replace("y?(a)ml", "yml", StringComparison.OrdinalIgnoreCase);
+                yield return mask.Replace("y?(a)ml", "yaml", StringComparison.OrdinalIgnoreCase);
                 yield break;
             }
 
-            // Belirli bir uzantı verilmişse olduğu gibi bırak
             if (mask.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
                 mask.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
             {
@@ -101,67 +107,42 @@ namespace SwarmBender.Core.Pipeline.Stages
                 yield break;
             }
 
-            // Aksi halde iki varyasyonu da dene
             yield return mask + ".yml";
             yield return mask + ".yaml";
         }
 
         /// <summary>
-        /// Expands a glob pattern relative to the given root using IFileSystem.GlobFiles.
-        /// Supports *.y?(a)ml by trying both yml and yaml masks while preserving
-        /// the original order per pattern.
+        /// Deep-merge named services from overlay into target (skips "*").
+        /// If a service does not exist on the target, adds it; otherwise merges field-wise.
         /// </summary>
-        private IEnumerable<string> ExpandFiles(string root, string pattern)
+        private static void MergeNamedServices(ComposeFile target, ComposeFile overlay)
         {
-            var absPattern = Path.IsPathRooted(pattern) ? pattern : Path.Combine(root, pattern);
+            if (overlay?.Services is null || overlay.Services.Count == 0) return;
 
-            // Support for "y?(a)ml" -> try yml and yaml variants
-            if (pattern.Contains("y?(a)ml", StringComparison.OrdinalIgnoreCase))
+            target.Services ??= new(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (name, osvc) in overlay.Services)
             {
-                var pYml = absPattern.Replace("y?(a)ml", "yml", StringComparison.OrdinalIgnoreCase);
-                var pYaml = absPattern.Replace("y?(a)ml", "yaml", StringComparison.OrdinalIgnoreCase);
+                if (name == "*" || osvc is null) continue;
 
-                var list = new List<string>();
-                list.AddRange(_fs.GlobFiles(root, MakeRelativeToRoot(root, pYml)));
-                list.AddRange(_fs.GlobFiles(root, MakeRelativeToRoot(root, pYaml)));
-
-                return list.Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
-            }
-
-            // Otherwise pass-through
-            return _fs.GlobFiles(root, MakeRelativeToRoot(root, absPattern))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
-        }
-
-        private static string MakeRelativeToRoot(string root, string absOrRel)
-        {
-            // IFileSystem.GlobFiles(root, pattern) expects a pattern relative to root;
-            // if absolute came in and starts with root, trim the prefix.
-            if (Path.IsPathRooted(absOrRel))
-            {
-                var normRoot = Path.GetFullPath(root)
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var normPath = Path.GetFullPath(absOrRel);
-                if (normPath.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase))
+                if (!target.Services.TryGetValue(name, out var tsvc) || tsvc is null)
                 {
-                    var rel = normPath.Substring(normRoot.Length)
-                        .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    return rel;
+                    target.Services[name] = osvc;
+                }
+                else
+                {
+                    MergeServiceInto(tsvc, osvc);
                 }
             }
-
-            return absOrRel;
         }
 
         /// <summary>
-        /// Shallow top-level merge for typed ComposeFile:
-        /// - IDictionary&lt;string, T&gt; props: add/overwrite keys from overlay
-        /// - IList props: append overlay items
+        /// Shallow top-level merge for typed ComposeFile, but SKIPS Services (handled elsewhere).
+        /// - IDictionary&lt;string, ?&gt;: add/overwrite keys from overlay
+        /// - IList: append overlay items
         /// - Scalar/complex refs: overwrite if overlay value != null
         /// </summary>
-        private static void ShallowTopLevelMerge(ComposeFile target, ComposeFile overlay)
+        private static void ShallowTopLevelMergeExceptServices(ComposeFile target, ComposeFile overlay)
         {
             if (overlay is null) return;
 
@@ -170,15 +151,17 @@ namespace SwarmBender.Core.Pipeline.Stages
             {
                 if (!prop.CanRead || !prop.CanWrite) continue;
 
+                if (string.Equals(prop.Name, nameof(ComposeFile.Services), StringComparison.Ordinal))
+                    continue; // Services are deep-merged separately
+
                 var oVal = prop.GetValue(overlay);
                 if (oVal is null) continue;
 
                 var tVal = prop.GetValue(target);
 
                 // IDictionary<string, ?>
-                if (IsStringKeyDictionary(prop.PropertyType, out var dictTypes))
+                if (IsStringKeyDictionary(prop.PropertyType, out _))
                 {
-                    // Ensure target dictionary exists
                     if (tVal is null)
                     {
                         prop.SetValue(target, oVal);
@@ -188,10 +171,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                     var tDict = (IDictionary)tVal;
                     var oDict = (IDictionary)oVal;
                     foreach (DictionaryEntry entry in oDict)
-                    {
-                        tDict[entry.Key] = entry.Value; // last-wins
-                    }
-
+                        tDict[entry.Key] = entry.Value; // last wins
                     continue;
                 }
 
@@ -210,7 +190,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                     continue;
                 }
 
-                // scalars/complex refs: overwrite
+                // scalar/complex → overwrite
                 prop.SetValue(target, oVal);
             }
         }
@@ -219,7 +199,6 @@ namespace SwarmBender.Core.Pipeline.Stages
         {
             genArgs = Type.EmptyTypes;
 
-            // Handle IDictionary<string, T> or concrete types implementing it
             var dictIface = type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IDictionary<,>)
                 ? type
                 : type.GetInterfaces().FirstOrDefault(i =>
@@ -237,11 +216,14 @@ namespace SwarmBender.Core.Pipeline.Stages
             return false;
         }
 
+        /// <summary>
+        /// Applies the special "*" service overlay to each concrete service in the working model.
+        /// Then removes "*" from overlay so it won't leak into the final Services dictionary.
+        /// </summary>
         private static void ApplyWildcardServicesOverlay(ComposeFile working, ComposeFile overlay)
         {
             if (overlay?.Services is null || working?.Services is null) return;
 
-            // "*" pseudo-service present?
             if (!overlay.Services.TryGetValue("*", out var wildcard) || wildcard is null)
                 return;
 
@@ -251,92 +233,125 @@ namespace SwarmBender.Core.Pipeline.Stages
                 MergeServiceInto(svc, wildcard);
             }
 
-            // remove wildcard from overlay so that later shallow merge doesn't add it back
             overlay.Services.Remove("*");
         }
 
+        /// <summary>
+        /// Deep-ish merge for a single service: field-wise, preserving non-null target values
+        /// unless overlay explicitly provides a replacement.
+        /// </summary>
         private static void MergeServiceInto(Service target, Service from)
         {
-            // Shallow per-property union (null-coalescing + deep-ish merges for complex alanlar)
-            // 1) logging
-            if (from.Logging is not null)
-                target.Logging ??= new Logging();
-            if (from.Logging is not null && target.Logging is not null)
-                MergeLogging(target.Logging, from.Logging);
+            if (from is null) return;
 
-            // 2) deploy.labels (ListOrDict)
-            if (from.Deploy?.Labels is not null)
+            // --- simple strings ---
+            target.Image           = from.Image           ?? target.Image;
+            target.User            = from.User            ?? target.User;
+            target.WorkingDir      = from.WorkingDir      ?? target.WorkingDir;
+            target.StopSignal      = from.StopSignal      ?? target.StopSignal;
+            target.StopGracePeriod = from.StopGracePeriod ?? target.StopGracePeriod;
+
+            // --- ListOrString (replace if provided) ---
+            target.Command    = from.Command    ?? target.Command;
+            target.Entrypoint = from.Entrypoint ?? target.Entrypoint;
+            target.EnvFile    = from.EnvFile    ?? target.EnvFile;
+            target.Dns        = from.Dns        ?? target.Dns;
+            target.DnsSearch  = from.DnsSearch  ?? target.DnsSearch;
+
+            // --- List<string> (replace if non-empty) ---
+            if (from.Devices  is { Count: > 0 }) target.Devices  = new(from.Devices);
+            if (from.Tmpfs    is { Count: > 0 }) target.Tmpfs    = new(from.Tmpfs);
+            if (from.CapAdd   is { Count: > 0 }) target.CapAdd   = new(from.CapAdd);
+            if (from.CapDrop  is { Count: > 0 }) target.CapDrop  = new(from.CapDrop);
+            if (from.Profiles is { Count: > 0 }) target.Profiles = new(from.Profiles);
+            if (from.DnsOpt   is { Count: > 0 }) target.DnsOpt   = new(from.DnsOpt);
+
+            // --- ListOrDict (map-merge; list => concat/replace policy below) ---
+            target.Environment = MergeListOrDict(target.Environment, from.Environment);
+            target.Labels      = MergeListOrDict(target.Labels,      from.Labels);
+
+            // --- logging (field-wise) ---
+            if (from.Logging is not null)
+            {
+                target.Logging ??= new Logging();
+                target.Logging.Driver = from.Logging.Driver ?? target.Logging.Driver;
+
+                if (from.Logging.Options is { Count: > 0 })
+                {
+                    target.Logging.Options ??= new(StringComparer.OrdinalIgnoreCase);
+                    foreach (var (k, v) in from.Logging.Options)
+                        target.Logging.Options[k] = v;
+                }
+            }
+
+            // --- healthcheck (field-wise) ---
+            if (from.Healthcheck is not null)
+            {
+                target.Healthcheck ??= new Healthcheck();
+                target.Healthcheck.Test        = from.Healthcheck.Test        ?? target.Healthcheck.Test;
+                target.Healthcheck.Interval    = from.Healthcheck.Interval    ?? target.Healthcheck.Interval;
+                target.Healthcheck.Timeout     = from.Healthcheck.Timeout     ?? target.Healthcheck.Timeout;
+                target.Healthcheck.StartPeriod = from.Healthcheck.StartPeriod ?? target.Healthcheck.StartPeriod;
+                target.Healthcheck.Retries     = from.Healthcheck.Retries     ?? target.Healthcheck.Retries;
+            }
+
+            // --- deploy (deep) ---
+            if (from.Deploy is not null)
             {
                 target.Deploy ??= new Deploy();
+
+                // replicas
+                if (from.Deploy.Replicas.HasValue)
+                    target.Deploy.Replicas = from.Deploy.Replicas;
+
+                // labels (ListOrDict)
                 target.Deploy.Labels = MergeListOrDict(target.Deploy.Labels, from.Deploy.Labels);
+
+                // update_config
+                if (from.Deploy.UpdateConfig is not null)
+                {
+                    target.Deploy.UpdateConfig ??= new UpdateConfig();
+                    var s = target.Deploy.UpdateConfig;
+                    var o = from.Deploy.UpdateConfig;
+                    if (o.Parallelism.HasValue) s.Parallelism = o.Parallelism;
+                    s.Delay = o.Delay ?? s.Delay;
+                    s.Order = o.Order ?? s.Order;
+                }
+
+                // restart_policy
+                if (from.Deploy.RestartPolicy is not null)
+                {
+                    target.Deploy.RestartPolicy ??= new RestartPolicy();
+                    var s = target.Deploy.RestartPolicy;
+                    var o = from.Deploy.RestartPolicy;
+                    s.Condition   = o.Condition   ?? s.Condition;
+                    s.Delay       = o.Delay       ?? s.Delay;
+                    if (o.MaxAttempts.HasValue) s.MaxAttempts = o.MaxAttempts;
+                    s.Window      = o.Window      ?? s.Window;
+                }
             }
 
-            // 3) environment (ListOrDict)
-            if (from.Environment is not null)
-                target.Environment = MergeListOrDict(target.Environment, from.Environment);
+            // --- volumes/ports/secrets/configs (replace if non-empty) ---
+            if (from.Volumes is { Count: > 0 }) target.Volumes = new(from.Volumes);
+            if (from.Ports   is { Count: > 0 }) target.Ports   = new(from.Ports);
+            if (from.Secrets is { Count: > 0 }) target.Secrets = new(from.Secrets);
+            if (from.Configs is { Count: > 0 }) target.Configs = new(from.Configs);
 
-            // 4) labels (service level)
-            if (from.Labels is not null)
-                target.Labels = MergeListOrDict(target.Labels, from.Labels);
+            // --- networks (short/long) ---
+            target.Networks = from.Networks ?? target.Networks;
 
-            // 5) healthcheck, logging driver vs. gibi basit alanları kopyala (null ise doldur, doluysa bırak)
-            target.Healthcheck ??= from.Healthcheck;
-            target.User ??= from.User;
-            target.WorkingDir ??= from.WorkingDir;
-            target.StopSignal ??= from.StopSignal;
-            target.StopGracePeriod ??= from.StopGracePeriod;
-
-            // 6) ports/volumes/secrets/configs gibi listeler -> concat (tekrar kontrolü istiyorsan distinct yapabilirsin)
-            if (from.Ports is { Count: > 0 })
-            {
-                target.Ports ??= new();
-                target.Ports.AddRange(from.Ports);
-            }
-
-            if (from.Volumes is { Count: > 0 })
-            {
-                target.Volumes ??= new();
-                target.Volumes.AddRange(from.Volumes);
-            }
-
-            if (from.Secrets is { Count: > 0 })
-            {
-                target.Secrets ??= new();
-                target.Secrets.AddRange(from.Secrets);
-            }
-
-            if (from.Configs is { Count: > 0 })
-            {
-                target.Configs ??= new();
-                target.Configs.AddRange(from.Configs);
-            }
-
-            // 7) networks (ServiceNetworks) -> smart merge
-            if (from.Networks is not null)
-                target.Networks = MergeServiceNetworks(target.Networks, from.Networks);
-
-            // 8) dns/dns_search/dns_opt vb.
-            target.Dns = MergeListOrString(target.Dns, from.Dns);
-            target.DnsSearch = MergeListOrString(target.DnsSearch, from.DnsSearch);
-            if (from.DnsOpt is { Count: > 0 })
-            {
-                target.DnsOpt ??= new();
-                target.DnsOpt.AddRange(from.DnsOpt);
-            }
-
-            // 9) extra_hosts, ulimits, sysctls
+            // --- extra_hosts / ulimits / sysctls ---
             target.ExtraHosts = MergeExtraHosts(target.ExtraHosts, from.ExtraHosts);
-            target.Ulimits = MergeUlimits(target.Ulimits, from.Ulimits);
-            target.Sysctls = MergeSysctls(target.Sysctls, from.Sysctls);
+            target.Ulimits    = MergeUlimits(target.Ulimits,       from.Ulimits);
+            target.Sysctls    = MergeSysctls(target.Sysctls,       from.Sysctls);
 
-            // 10) x-sb alanları
+            // --- x-sb meta (kept in model, filtered at serialize if needed) ---
             if (from.X_Sb_Secrets is { Count: > 0 })
             {
                 target.X_Sb_Secrets ??= new();
                 foreach (var kv in from.X_Sb_Secrets)
                     target.X_Sb_Secrets[kv.Key] = kv.Value;
             }
-
             if (from.X_Sb_Groups is { Count: > 0 })
             {
                 target.X_Sb_Groups ??= new();
@@ -344,26 +359,12 @@ namespace SwarmBender.Core.Pipeline.Stages
             }
         }
 
-        private static void MergeLogging(Logging target, Logging from)
-        {
-            // driver overwrite if provided
-            target.Driver ??= from.Driver;
-
-            // options map merge (right wins)
-            if (from.Options is { Count: > 0 })
-            {
-                target.Options ??= new();
-                foreach (var kv in from.Options)
-                    target.Options[kv.Key] = kv.Value;
-            }
-        }
-
         private static ListOrDict? MergeListOrDict(ListOrDict? left, ListOrDict? right)
         {
             if (right is null) return left;
-            if (left is null) return right;
+            if (left  is null) return right;
 
-            // map-map -> right wins by key
+            // map-map: key-wise merge (right wins)
             if (left.AsMap is not null && right.AsMap is not null)
             {
                 foreach (var kv in right.AsMap)
@@ -371,23 +372,22 @@ namespace SwarmBender.Core.Pipeline.Stages
                 return left;
             }
 
-            // list-list -> concat
+            // list-list: append
             if (left.AsList is not null && right.AsList is not null)
             {
                 left.AsList.AddRange(right.AsList);
                 return left;
             }
 
-            // mixed: tercih map (daha deterministik)
+            // mixed: prefer right (deterministic)
             return right;
         }
 
         private static ServiceNetworks? MergeServiceNetworks(ServiceNetworks? left, ServiceNetworks? right)
         {
             if (right is null) return left;
-            if (left is null) return right;
+            if (left  is null) return right;
 
-            // map-map → key bazlı merge (right wins)
             if (left.AsMap is not null && right.AsMap is not null)
             {
                 foreach (var kv in right.AsMap)
@@ -395,26 +395,22 @@ namespace SwarmBender.Core.Pipeline.Stages
                 return left;
             }
 
-            // list-list → concat
             if (left.AsList is not null && right.AsList is not null)
             {
                 left.AsList.AddRange(right.AsList);
                 return left;
             }
 
-            // Karışık durum (list ↔ map) → deterministik olsun diye right'ı tercih et
-            // (Compose'ta her iki kısa/uzun sözdizimi destekleniyor; tek tipe indirerek belirsizliği önlüyoruz)
             return right;
         }
 
-// ListOrString için “right wins unless null”
         private static ListOrString? MergeListOrString(ListOrString? left, ListOrString? right)
             => right ?? left;
 
         private static ExtraHosts? MergeExtraHosts(ExtraHosts? left, ExtraHosts? right)
         {
             if (right is null) return left;
-            if (left is null) return right;
+            if (left  is null) return right;
 
             if (right.AsList is { Count: > 0 })
             {
@@ -435,41 +431,33 @@ namespace SwarmBender.Core.Pipeline.Stages
         private static Ulimits? MergeUlimits(Ulimits? left, Ulimits? right)
         {
             if (right is null) return left;
-            if (left is null) return right;
+            if (left  is null) return right;
 
             if (right.Map.Count == 0) return left;
 
             foreach (var kv in right.Map)
             {
-                var key = kv.Key;
+                var key    = kv.Key;
                 var rEntry = kv.Value;
-
-                // right'ta null yok sayılır (olasılık düşük ama defansif)
-                if (rEntry is null)
-                    continue;
+                if (rEntry is null) continue;
 
                 if (!left.Map.TryGetValue(key, out var lEntry) || lEntry is null)
                 {
-                    // left'te yoksa doğrudan ekle
                     left.Map[key] = rEntry;
                     continue;
                 }
 
-                // İkisi de var → tip kombinasyonlarına göre davran
                 var lObj = lEntry.IsObject;
                 var rObj = rEntry.IsObject;
 
                 if (lObj && rObj)
                 {
-                    // object-object: alan bazlı merge (right dolu alanları yazar)
                     if (rEntry.Soft.HasValue) lEntry.Soft = rEntry.Soft;
                     if (rEntry.Hard.HasValue) lEntry.Hard = rEntry.Hard;
                 }
                 else
                 {
-                    // Diğer tüm durumlarda right tüm girdiyi override eder
-                    // (single→single, object→single, single→object)
-                    left.Map[key] = rEntry;
+                    left.Map[key] = rEntry; // override for other combinations
                 }
             }
 
@@ -479,15 +467,12 @@ namespace SwarmBender.Core.Pipeline.Stages
         private static Sysctls? MergeSysctls(Sysctls? left, Sysctls? right)
         {
             if (right is null) return left;
-            if (left is null) return right;
+            if (left  is null) return right;
 
             if (right.Map.Count == 0) return left;
 
             foreach (var kv in right.Map)
-            {
-                // overwrite or add
                 left.Map[kv.Key] = kv.Value;
-            }
 
             return left;
         }

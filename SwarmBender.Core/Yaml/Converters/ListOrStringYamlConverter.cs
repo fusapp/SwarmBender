@@ -1,25 +1,30 @@
-using SwarmBender.Core.Data.Compose;
+using System;
+using System.Collections.Generic;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
 using YamlDotNet.Serialization;
+using SwarmBender.Core.Data.Compose;
 
-namespace SwarmBender.Core.Yaml.Converters;
-
-public class ListOrStringYamlConverter : IYamlTypeConverter
+public sealed class ListOrStringYamlConverter : IYamlTypeConverter
 {
     public bool Accepts(Type type) => type == typeof(ListOrString);
 
     public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
     {
         if (parser.TryConsume<Scalar>(out var scalar))
-            return ListOrString.FromString(scalar.Value);
+        {
+            return ListOrString.FromString(scalar.Value ?? string.Empty);
+        }
 
-        if (parser.TryConsume<SequenceStart>(out _))
+        if (parser.TryConsume<SequenceStart>(out var _))
         {
             var list = new List<string>();
-            while (!parser.Accept<SequenceEnd>(out _))
-                list.Add(parser.Consume<Scalar>().Value);
-            parser.Consume<SequenceEnd>();
+            while (!parser.TryConsume<SequenceEnd>(out _))
+            {
+                // strings inside the sequence
+                var item = rootDeserializer(typeof(string)) as string ?? string.Empty;
+                list.Add(item);
+            }
             return ListOrString.FromList(list);
         }
 
@@ -28,16 +33,22 @@ public class ListOrStringYamlConverter : IYamlTypeConverter
 
     public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer)
     {
-        var v = (ListOrString?)value;
+        var los = value as ListOrString;
 
-        if (v?.AsList is { Count: > 0 })
+        if (los?.AsList is { Count: > 0 } list)
         {
-            emitter.Emit(new SequenceStart(null, null, false, SequenceStyle.Block));
-            foreach (var s in v.AsList) emitter.Emit(new Scalar(s));
+            // Emit as FLOW sequence: [ "CMD", "curl", ... ]
+            emitter.Emit(new SequenceStart(null, null, false, SequenceStyle.Flow));
+            foreach (var s in list)
+            {
+                emitter.Emit(new Scalar(null, null, s ?? string.Empty, ScalarStyle.DoubleQuoted, true, false));
+            }
             emitter.Emit(new SequenceEnd());
             return;
         }
 
-        emitter.Emit(new Scalar(v?.AsString ?? string.Empty));
+        // Single string case
+        var str = los?.AsString ?? string.Empty;
+        emitter.Emit(new Scalar(null, null, str, ScalarStyle.DoubleQuoted, true, false));
     }
 }

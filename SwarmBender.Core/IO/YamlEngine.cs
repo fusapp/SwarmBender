@@ -23,6 +23,7 @@ public sealed class YamlEngine : IYamlEngine
 
     private readonly ISerializer _s = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
+        .DisableAliases()
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .WithTypeConverter(new ExternalDefYamlConverter())
         .WithTypeConverter(new ExtraHostsYamlConverter())

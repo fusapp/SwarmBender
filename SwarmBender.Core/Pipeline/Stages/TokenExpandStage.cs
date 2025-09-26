@@ -1,5 +1,10 @@
+using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
 using SwarmBender.Core.Data.Models;
@@ -11,6 +16,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// Expands token placeholders on the typed compose model.
     /// Supported patterns: ${NAME} and {{NAME}}.
     /// Sources: SB_* defaults + config.tokens.user (user overrides).
+    /// Service-specific token SB_SERVICE_NAME is injected per service.
     /// </summary>
     public sealed class TokenExpandStage : IRenderStage
     {
@@ -30,7 +36,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             {
                 ct.ThrowIfCancellationRequested();
 
-                // add per-service implicit token
+                // per-service implicit token
                 var tokens = new Dictionary<string, string>(baseTokens, StringComparer.OrdinalIgnoreCase)
                 {
                     ["SB_SERVICE_NAME"] = svcName
@@ -62,7 +68,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                 ExpandListOrDict(svc.Environment, tokens);
                 ExpandListOrDict(svc.Labels, tokens);
 
-                // deploy.labels (dictionary wrapped in ListOrDict)
+                // deploy.labels (dictionary inside ListOrDict)
                 if (svc.Deploy?.Labels is not null)
                     ExpandListOrDict(svc.Deploy.Labels, tokens);
 
@@ -86,20 +92,21 @@ namespace SwarmBender.Core.Pipeline.Stages
                     svc.Healthcheck.Interval    = ReplaceTokens(svc.Healthcheck.Interval, tokens);
                     svc.Healthcheck.Timeout     = ReplaceTokens(svc.Healthcheck.Timeout, tokens);
                     svc.Healthcheck.StartPeriod = ReplaceTokens(svc.Healthcheck.StartPeriod, tokens);
+                    // Retries is int?; token expansion not applicable.
                 }
 
-                // volumes (mounts) – only textual fields that exist
+                // volumes (mounts) – textual fields only
                 if (svc.Volumes is not null)
                 {
                     foreach (var m in svc.Volumes)
                     {
                         m.Source = ReplaceTokens(m.Source, tokens);
                         m.Target = ReplaceTokens(m.Target, tokens);
-                        // m.Type vb. varsa string ise burada genişletilebilir; SubPath yok.
+                        // If you add more string fields later, expand here.
                     }
                 }
 
-                // ports – expand textual fields only (no Name in PortMapping)
+                // ports – textual fields only
                 if (svc.Ports is not null)
                 {
                     foreach (var p in svc.Ports)
@@ -126,6 +133,34 @@ namespace SwarmBender.Core.Pipeline.Stages
                     {
                         r.Source = ReplaceTokens(r.Source, tokens);
                         r.Target = ReplaceTokens(r.Target, tokens);
+                    }
+                }
+
+                // extra_hosts (map)
+                if (svc.ExtraHosts is not null && svc.ExtraHosts.AsMap is not null)
+                {
+                    var newMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var (host, ip) in svc.ExtraHosts.AsMap)
+                    {
+                        var newKey = ReplaceTokens(host, tokens) ?? host;
+                        newMap[newKey] = ReplaceTokens(ip, tokens) ?? ip;
+                    }
+                    svc.ExtraHosts.AsMap = newMap;
+                }
+
+                // networks (long syntax attachments)
+                if (svc.Networks?.AsMap is not null)
+                {
+                    foreach (var (_, att) in svc.Networks.AsMap)
+                    {
+                        if (att is null) continue;
+                        if (att.Aliases is not null)
+                            ExpandStringList(att.Aliases, tokens);
+
+                        // If ServiceNetworkAttachment has other string fields (e.g., ipv4_address),
+                        // expand them here similarly:
+                        att.Ipv4Address = ReplaceTokens(att.Ipv4Address, tokens);
+                        att.Ipv6Address = ReplaceTokens(att.Ipv6Address, tokens);
                     }
                 }
 
@@ -195,8 +230,10 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var keys = new List<string>(map.Keys);
                 foreach (var k in keys)
                     map[k] = ReplaceTokens(map[k], tokens);
+                return;
             }
-            else if (lod.AsList is not null)
+
+            if (lod.AsList is not null)
             {
                 var list = lod.AsList;
                 for (int i = 0; i < list.Count; i++)
@@ -207,13 +244,17 @@ namespace SwarmBender.Core.Pipeline.Stages
                     var eq = item.IndexOf('=', StringComparison.Ordinal);
                     if (eq < 0)
                     {
+                        // bare item: tümü expand
                         list[i] = ReplaceTokens(item, tokens);
                     }
                     else
                     {
+                        // "KEY=VALUE": hem key hem value expand
                         var key = item[..eq];
                         var val = item[(eq + 1)..];
-                        list[i] = key + "=" + (ReplaceTokens(val, tokens) ?? val);
+                        var newKey = ReplaceTokens(key, tokens) ?? key;
+                        var newVal = ReplaceTokens(val, tokens) ?? val;
+                        list[i] = newKey + "=" + newVal;
                     }
                 }
             }

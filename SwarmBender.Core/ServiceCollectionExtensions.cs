@@ -36,9 +36,11 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IRenderStage, EnvJsonCollectStage>();
         services.AddSingleton<IRenderStage, ProvidersAggregateStage>();
         services.AddSingleton<IRenderStage, EnvironmentApplyStage>();
+        services.AddSingleton<IRenderStage, GroupsApplyStage>();
         services.AddSingleton<IRenderStage, LabelsStage>();
         services.AddSingleton<IRenderStage, SecretsAttachStage>();
         services.AddSingleton<IRenderStage, TokenExpandStage>();
+        services.AddSingleton<IRenderStage, StripCustomKeysStage>();
         services.AddSingleton<IRenderStage, SerializeStage>();
 
         return services;

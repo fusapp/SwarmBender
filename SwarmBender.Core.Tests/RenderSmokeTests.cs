@@ -328,6 +328,11 @@ services:
     {
         public Task<Dictionary<string, string>> CollectAsync(ProvidersInfisical cfg, string scope, CancellationToken ct)
             => Task.FromResult(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+
+        public Task<Dictionary<string, string>> CollectAsync(ProvidersInfisical cfg, string stackId, string env, CancellationToken ct)
+        {
+            throw new NotImplementedException();
+        }
     }
 
     public sealed class FakeKvCollector : IAzureKvCollector
@@ -348,5 +353,10 @@ services:
 
         public Task<Dictionary<string, string>> CollectAsync(ProvidersInfisical cfg, string scope, CancellationToken ct)
             => Task.FromResult(new Dictionary<string, string>(_data, StringComparer.OrdinalIgnoreCase));
+
+        public Task<Dictionary<string, string>> CollectAsync(ProvidersInfisical cfg, string stackId, string env, CancellationToken ct)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

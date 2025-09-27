@@ -10,6 +10,7 @@ public interface IInfisicalCollector
 {
     Task<Dictionary<string, string>> CollectAsync(
         ProvidersInfisical cfg,
+        string stackId,
         string env,
         CancellationToken ct);
 }

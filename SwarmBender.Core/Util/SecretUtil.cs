@@ -34,6 +34,10 @@ internal static class SecretUtil
         );
     }
     
+    public static string ToComposeCanon(string key)
+        => string.IsNullOrWhiteSpace(key) ? ""
+            : key.Replace(".", "__");
+    
     public static Regex WildcardToRegex(string pattern)
     {
         var escaped = Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".");

@@ -56,13 +56,13 @@ namespace SwarmBender.Core.Pipeline.Stages
                 foreach (var key in matchedKeys)
                 {
                     var value = envMap[key] ?? string.Empty;
-
+                    var keyCanon = SecretUtil.ToComposeCanon(key);
                     var externalName = SecretUtil.BuildExternalName(
                         secretsCfg?.NameTemplate,
                         ctx.Request.StackId,
                         svcName,
                         ctx.Request.Env,
-                        key,
+                        keyCanon,
                         value,
                         secretsCfg?.VersionMode
                     );
@@ -96,6 +96,7 @@ namespace SwarmBender.Core.Pipeline.Stages
 
                     // Remove plain env value (do not leak)
                     envMap.Remove(key);
+                    envMap.Remove(keyCanon);
                 }
 
                 // Write back remaining env as map

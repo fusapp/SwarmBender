@@ -69,7 +69,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                         if (ctx.Config?.Providers?.Infisical is { Enabled: true } inf)
                         {
                             var scope = $"{ctx.Request.StackId}/{ctx.Request.Env}";
-                            var data = await _inf.CollectAsync(inf, scope, ct).ConfigureAwait(false);
+                            var data = await _inf.CollectAsync(inf, ctx.Request.StackId,ctx.Request.Env, ct).ConfigureAwait(false);
                             foreach (var kvp in data)
                                 envBag[kvp.Key] = kvp.Value;
                         }

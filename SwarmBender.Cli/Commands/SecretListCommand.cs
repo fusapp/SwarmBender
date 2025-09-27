@@ -23,13 +23,23 @@ public sealed class SecretListCommand : AsyncCommand<SecretListCommand.Settings>
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
     {
-        var cfg = await _cfgLoader.LoadAsync(s.Root, CancellationToken.None);
-        var found = await _discovery.DiscoverAsync(s.Root, s.StackId, s.Env, cfg, CancellationToken.None);
+        AnsiConsole.WriteLine("Trying to list secrets");
+        try
+        {
+            var cfg = await _cfgLoader.LoadAsync(s.Root, CancellationToken.None);
+            var found = await _discovery.DiscoverAsync(s.Root, s.StackId, s.Env, cfg, CancellationToken.None);
 
-        var table = new Table().AddColumns("externalName","key","version", s.ShowValues ? "value" : " ");
-        foreach (var d in found.OrderBy(x => x.ExternalName, StringComparer.OrdinalIgnoreCase))
-            table.AddRow(d.ExternalName, d.Key, d.Version, s.ShowValues ? d.Value : "");
-        AnsiConsole.Write(table);
-        return 0;
+            var table = new Table().AddColumns("externalName","key","version", s.ShowValues ? "value" : " ");
+            foreach (var d in found.OrderBy(x => x.ExternalName, StringComparer.OrdinalIgnoreCase))
+                table.AddRow(d.ExternalName, d.Key, d.Version, s.ShowValues ? d.Value : "");
+            AnsiConsole.Write(table);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            AnsiConsole.WriteException(e);
+            throw;
+        }
+        
     }
 }

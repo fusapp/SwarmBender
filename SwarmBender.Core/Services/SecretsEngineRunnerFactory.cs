@@ -8,11 +8,12 @@ public sealed class SecretsEngineRunnerFactory : ISecretsEngineRunnerFactory
     public ISecretsEngineRunner Create(SecretsEngine engine)
     {
         var type = engine?.Type?.ToLowerInvariant() ?? "docker-cli";
+        Console.WriteLine($"Docker Type {type}");
         return type switch
         {
-            "docker-cli"    => new DockerCliSecretsRunner(engine!.Args),
-            "docker-dotnet" => new DockerCliSecretsRunner(engine!.Args), // şimdilik cli
-            _               => new DockerCliSecretsRunner(engine!.Args)
+            "docker-dotnet" => new DockerDotnetSecretsRunner(engine!.Args),
+            "docker-cli" or null => new DockerCliSecretsRunner(engine!.Args), // geri uyumluluk
+            _ => throw new NotSupportedException($"Unknown secrets engine: {engine!.Type}")
         };
     }
 }

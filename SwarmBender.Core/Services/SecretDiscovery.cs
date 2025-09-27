@@ -29,7 +29,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
 
         // 1) Env torbasını düzleştir
         var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct);
-
+        Console.WriteLine(string.Join(Environment.NewLine, envBag));
         // 2) Secretize filtreleri
         var secretize = cfg.Secretize;
         if (secretize is not { Enabled: true } || secretize.Paths is null || secretize.Paths.Count == 0)
@@ -46,7 +46,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
         foreach (var kv in envBag)
         {
             if (!matchers.Any(rx => rx.IsMatch(kv.Key))) continue;
-
+            var keyCanon = SecretUtil.ToComposeCanon(kv.Key);
             foreach (var svc in targets)
             {
                 var externalName = SecretUtil.BuildExternalName(
@@ -54,7 +54,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     stackId,
                     svc,
                     env,
-                    kv.Key,
+                    keyCanon,
                     kv.Value,
                     cfg.Secrets?.VersionMode
                 );
@@ -63,7 +63,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
 
                 discovered.Add(new DiscoveredSecret(
                     Scope: $"{stackId}_{svc}",
-                    Key: kv.Key,
+                    Key: keyCanon,
                     Value: kv.Value,
                     Version: versionSuffix,
                     ExternalName: externalName
@@ -121,7 +121,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     break;
                 case "infisical":
                     if (cfg.Providers.Infisical is { Enabled: true } inf)
-                        foreach (var it in await _inf.CollectAsync(inf, $"{stackId}/{env}", ct))
+                        foreach (var it in await _inf.CollectAsync(inf, stackId, env, ct))
                             bag[it.Key] = it.Value;
                     break;
             }

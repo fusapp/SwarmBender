@@ -16,22 +16,42 @@ internal static class SecretUtil
         string value,
         string? versionMode)
     {
-        // Normalize – HER İKİ tarafta aynı kural:
         var envNorm = env?.Trim().ToLowerInvariant() ?? "dev";
-        var svcNorm = serviceName?.Trim() ?? "";
-        var keyNorm = key?.Trim() ?? "";
+        var svcNorm = serviceName?.Trim() ?? string.Empty;
+        var keyCanon = ToComposeCanon(key?.Trim() ?? string.Empty);
+        var version  = VersionSuffix(value ?? string.Empty, versionMode);
 
-        var versionSuffix = SecretUtil.VersionSuffix(value ?? string.Empty, versionMode);
-
-        // Varolan MakeNameWithDockerFallback mantığını burada topla:
-        return SecretUtil.MakeNameWithDockerFallback(
+        return MakeNameWithDockerFallback(
             nameTemplate,
             stackId,
             svcNorm,
             envNorm,
-            keyNorm,
-            versionSuffix
+            keyCanon,
+            version
         );
+    }
+    
+    public static List<string> CanonicalizeKeys(IEnumerable<string> keys)
+    {
+        var list = keys.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (list.Count <= 1) return list;
+
+        var underscoreSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in list)
+            if (k.Contains("__")) underscoreSet.Add(k);
+
+        var result = new List<string>(list.Count);
+        foreach (var k in list)
+        {
+            if (k.Contains('.'))
+            {
+                var underscoreAlt = k.Replace(".", "__");
+                if (underscoreSet.Contains(underscoreAlt))
+                    continue; // "__" varsa "." formunu at
+            }
+            result.Add(k);
+        }
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
     
     public static string ToComposeCanon(string key)

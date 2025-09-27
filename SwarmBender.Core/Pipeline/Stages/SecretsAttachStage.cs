@@ -46,8 +46,8 @@ namespace SwarmBender.Core.Pipeline.Stages
                 if (envMap.Count == 0) continue;
 
                 // Match + canonicalize (prefer "__" variant if both "A.B" and "A__B" exist)
-                var matchedRaw = envMap.Keys.Where(k => patterns.Any(rx => rx.IsMatch(k)));
-                var matchedKeys = CanonicalizeKeys(matchedRaw);
+                var matchedRaw  = envMap.Keys.Where(k => patterns.Any(rx => rx.IsMatch(k)));
+                var matchedKeys = SecretUtil.CanonicalizeKeys(matchedRaw);
 
                 if (matchedKeys.Count == 0) continue;
 
@@ -89,7 +89,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                         svc.Secrets.Add(new ServiceSecretRef
                         {
                             Source = externalName,
-                            Target = key,
+                            Target = keyCanon,
                             Mode = 288 // 0440
                         });
                     }
@@ -147,32 +147,6 @@ namespace SwarmBender.Core.Pipeline.Stages
         }
 
         // Prefer "__" version if both "A.B" and "A__B" exist.
-        private static List<string> CanonicalizeKeys(IEnumerable<string> keys)
-        {
-            var list = keys.ToList();
-            if (list.Count <= 1) return list;
-
-            var underscoreSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var k in list)
-                if (k.Contains("__"))
-                    underscoreSet.Add(k);
-
-            var result = new List<string>(list.Count);
-            foreach (var k in list)
-            {
-                if (k.Contains('.'))
-                {
-                    var underscoreAlt = k.Replace(".", "__");
-                    if (underscoreSet.Contains(underscoreAlt))
-                        continue; // drop dot-form if __-form exists
-                }
-                result.Add(k);
-            }
-
-            // de-dup case-insensitively
-            return result
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
+        
     }
 }

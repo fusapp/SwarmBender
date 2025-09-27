@@ -29,7 +29,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
 
         // 1) Env torbasını düzleştir
         var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct);
-        Console.WriteLine(string.Join(Environment.NewLine, envBag));
+
         // 2) Secretize filtreleri
         var secretize = cfg.Secretize;
         if (secretize is not { Enabled: true } || secretize.Paths is null || secretize.Paths.Count == 0)
@@ -41,12 +41,29 @@ public sealed class SecretDiscovery : ISecretDiscovery
         var serviceNames = TryLoadServiceNames(repoRoot, stackId);
         var targets = serviceNames.Count > 0 ? serviceNames : new List<string> { "all" };
 
-        // 4) Keşif (render ile aynı isimlendirme)
+        // 4) Keşif — Stage ile birebir aynı isimlendirme/kanonikleştirme
         var discovered = new List<DiscoveredSecret>();
-        foreach (var kv in envBag)
+        var seenExternal = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // önce eşleşenleri bul (hem orijinal anahtar hem kanonik form match edebilir)
+        var matchedRaw = envBag.Keys.Where(k =>
         {
-            if (!matchers.Any(rx => rx.IsMatch(kv.Key))) continue;
-            var keyCanon = SecretUtil.ToComposeCanon(kv.Key);
+            var canon = SecretUtil.ToComposeCanon(k);
+            return matchers.Any(rx => rx.IsMatch(k)) || matchers.Any(rx => rx.IsMatch(canon));
+        });
+
+        // aynı key’in "." ve "__" varyantı varsa "__" olanı tercih et
+        var matchedKeys = SecretUtil.CanonicalizeKeys(matchedRaw);
+
+        foreach (var key in matchedKeys)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var keyCanon = SecretUtil.ToComposeCanon(key);
+            // değeri hem orijinal hem kanonik isimde arayıp ilk bulunanı al
+            var hasVal = envBag.TryGetValue(key, out var val) || envBag.TryGetValue(keyCanon, out val);
+            var value = hasVal ? (val ?? string.Empty) : string.Empty;
+
             foreach (var svc in targets)
             {
                 var externalName = SecretUtil.BuildExternalName(
@@ -54,17 +71,21 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     stackId,
                     svc,
                     env,
-                    keyCanon,
-                    kv.Value,
+                    keyCanon,        
+                    value ?? string.Empty,
                     cfg.Secrets?.VersionMode
                 );
 
-                var versionSuffix = SecretUtil.VersionSuffix(kv.Value, cfg.Secrets?.VersionMode);
+                // aynı external adı bir kez
+                if (!seenExternal.Add(externalName))
+                    continue;
+
+                var versionSuffix = SecretUtil.VersionSuffix(value ?? string.Empty, cfg.Secrets?.VersionMode);
 
                 discovered.Add(new DiscoveredSecret(
                     Scope: $"{stackId}_{svc}",
                     Key: keyCanon,
-                    Value: kv.Value,
+                    Value: value ?? string.Empty,
                     Version: versionSuffix,
                     ExternalName: externalName
                 ));
@@ -162,8 +183,9 @@ public sealed class SecretDiscovery : ISecretDiscovery
         static void Emit(string key, string val, IDictionary<string, string> sink)
         {
             if (string.IsNullOrEmpty(key)) return;
+            // hem "A.B" hem "A__B" ekle (discovery & stage uyumlu)
             sink[key] = val;
-            sink[key.Replace(".", "__")] = val; // "__" eşleniğini de ekle
+            sink[key.Replace(".", "__")] = val;
         }
     }
 

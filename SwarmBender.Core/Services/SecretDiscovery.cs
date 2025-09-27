@@ -24,34 +24,50 @@ public sealed class SecretDiscovery : ISecretDiscovery
     public async Task<IReadOnlyList<DiscoveredSecret>> DiscoverAsync(
         string repoRoot, string stackId, string env, SbConfig cfg, CancellationToken ct)
     {
-        // 1) Flatten env bag (EnvJsonCollectStage ile aynı)
+        // Render ile aynı normalizasyon
+        env = env?.Trim().ToLowerInvariant() ?? "dev";
+
+        // 1) Env torbasını düzleştir
         var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct);
 
-        // 2) Secretize eşleşmesi
+        // 2) Secretize filtreleri
         var secretize = cfg.Secretize;
-        if (secretize is not { Enabled: true } || secretize.Paths.Count == 0)
+        if (secretize is not { Enabled: true } || secretize.Paths is null || secretize.Paths.Count == 0)
             return Array.Empty<DiscoveredSecret>();
 
         var matchers = secretize.Paths.Select(SecretUtil.WildcardToRegex).ToArray();
 
-        // 3) Service-scope: Hizalamayı korumak için stack/template’ten servis adlarını okumayı dene
-        //    Servis yoksa "all" scope’una düş (tek scope).
+        // 3) Servis listesi (template varsa ondan, yoksa tek "all")
         var serviceNames = TryLoadServiceNames(repoRoot, stackId);
+        var targets = serviceNames.Count > 0 ? serviceNames : new List<string> { "all" };
 
+        // 4) Keşif (render ile aynı isimlendirme)
         var discovered = new List<DiscoveredSecret>();
         foreach (var kv in envBag)
         {
             if (!matchers.Any(rx => rx.IsMatch(kv.Key))) continue;
 
-            // Her service için ayrı secret (render paralelliği)
-            var svcList = serviceNames.Count > 0 ? serviceNames : new List<string> { "all" };
-            foreach (var svc in svcList)
+            foreach (var svc in targets)
             {
-                var ver = SecretUtil.VersionSuffix(kv.Value, cfg.Secrets.VersionMode);
-                var name = SecretUtil.MakeNameWithDockerFallback(
-                    cfg.Secrets.NameTemplate, stackId, svc, env, kv.Key, ver);
+                var externalName = SecretUtil.BuildExternalName(
+                    cfg.Secrets?.NameTemplate,
+                    stackId,
+                    svc,
+                    env,
+                    kv.Key,
+                    kv.Value,
+                    cfg.Secrets?.VersionMode
+                );
 
-                discovered.Add(new DiscoveredSecret($"{stackId}_{svc}", kv.Key, kv.Value, ver, name));
+                var versionSuffix = SecretUtil.VersionSuffix(kv.Value, cfg.Secrets?.VersionMode);
+
+                discovered.Add(new DiscoveredSecret(
+                    Scope: $"{stackId}_{svc}",
+                    Key: kv.Key,
+                    Value: kv.Value,
+                    Version: versionSuffix,
+                    ExternalName: externalName
+                ));
             }
         }
 
@@ -63,7 +79,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
     {
         var bag = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // stacks/all/{env}/env + stacks/{stack}/{env}/env + extra
+        // stacks/all/{env}/env + stacks/{stackId}/{env}/env + extra
         var dirs = new List<string>
         {
             $"stacks/all/{env}/env",
@@ -85,7 +101,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
             }
         }
 
-        // Providers order
+        // Provider toplama sırası
         var order = cfg.Providers.Order?.Select(o => o.Type).ToList()
                     ?? new List<string> { "file", "env", "azure-kv", "infisical" };
 
@@ -93,7 +109,8 @@ public sealed class SecretDiscovery : ISecretDiscovery
         {
             switch (type.Trim().ToLowerInvariant())
             {
-                case "file": break; // zaten eklendi
+                case "file":
+                    break; // zaten okundu
                 case "env":
                     MergeFromProcessEnvironment(root, stackId, env, cfg, bag);
                     break;
@@ -121,42 +138,46 @@ public sealed class SecretDiscovery : ISecretDiscovery
                 foreach (var p in el.EnumerateObject())
                     FlattenJson(p.Value, string.IsNullOrEmpty(prefix) ? p.Name : $"{prefix}.{p.Name}", sink);
                 break;
+
             case JsonValueKind.Array:
                 int i = 0;
                 foreach (var item in el.EnumerateArray())
-                {
-                    FlattenJson(item, string.IsNullOrEmpty(prefix) ? $"{i}" : $"{prefix}.{i}", sink);
-                    i++;
-                }
-
+                    FlattenJson(item, string.IsNullOrEmpty(prefix) ? $"{i++}" : $"{prefix}.{i++}", sink);
                 break;
-            case JsonValueKind.String: Emit(prefix!, el.GetString() ?? "", sink); break;
-            case JsonValueKind.Number: Emit(prefix!, el.ToString(), sink); break;
+
+            case JsonValueKind.String:
+                Emit(prefix!, el.GetString() ?? "", sink);
+                break;
+
+            case JsonValueKind.Number:
+                Emit(prefix!, el.ToString(), sink);
+                break;
+
             case JsonValueKind.True:
-            case JsonValueKind.False: Emit(prefix!, el.GetBoolean().ToString(), sink); break;
+            case JsonValueKind.False:
+                Emit(prefix!, el.GetBoolean().ToString(), sink);
+                break;
         }
 
         static void Emit(string key, string val, IDictionary<string, string> sink)
         {
             if (string.IsNullOrEmpty(key)) return;
             sink[key] = val;
-            sink[key.Replace(".", "__")] = val; // double-underscore karşılığı
+            sink[key.Replace(".", "__")] = val; // "__" eşleniğini de ekle
         }
     }
 
-    private static void MergeFromProcessEnvironment(string root, string stackId, string env, SbConfig cfg,
-        Dictionary<string, string> bag)
+    private static void MergeFromProcessEnvironment(
+        string root, string stackId, string env, SbConfig cfg, Dictionary<string, string> bag)
     {
         var patterns = new List<string>();
         var searchSpecs = cfg.Providers.Env.AllowlistFileSearch ?? new();
 
         foreach (var spec in searchSpecs)
         {
-            // {stackId}/{env} placeholderlarını doldur
             var resolved = spec.Replace("{stackId}", stackId).Replace("{env}", env);
             var full = Path.IsPathRooted(resolved) ? resolved : Path.Combine(root, resolved);
 
-            // 1) Eğer full bir KLASÖR ise: içindeki *.json dosyalarını al
             if (Directory.Exists(full))
             {
                 foreach (var file in Directory.EnumerateFiles(full, "*.json", SearchOption.TopDirectoryOnly))
@@ -164,14 +185,12 @@ public sealed class SecretDiscovery : ISecretDiscovery
                 continue;
             }
 
-            // 2) Eğer full bir DOSYA ise: doğrudan oku
             if (File.Exists(full))
             {
                 TryReadAllowlistFile(full, patterns);
                 continue;
             }
 
-            // 3) Basit glob desteği: .../path/*.json gibi (Directory.GetFiles ile)
             var dir = Path.GetDirectoryName(full);
             var mask = Path.GetFileName(full);
             if (!string.IsNullOrEmpty(dir) && !string.IsNullOrEmpty(mask) && Directory.Exists(dir))
@@ -179,7 +198,6 @@ public sealed class SecretDiscovery : ISecretDiscovery
                 foreach (var file in Directory.GetFiles(dir, mask, SearchOption.TopDirectoryOnly))
                     TryReadAllowlistFile(file, patterns);
             }
-            // Yol yoksa sessizce geç (hata fırlatma)
         }
 
         if (patterns.Count == 0) return;
@@ -205,7 +223,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
             }
             catch
             {
-                // kötü formatlı dosyayı yoksay
+                // bozuk allowlist dosyasını yoksay
             }
         }
     }
@@ -217,20 +235,22 @@ public sealed class SecretDiscovery : ISecretDiscovery
         var file = File.Exists(tplYml) ? tplYml : File.Exists(tplYaml) ? tplYaml : null;
         if (file is null) return new();
 
-        // çok basit/defansif bir okuma (tam compose parse’a gerek yok)
         var names = new List<string>();
         var text = File.ReadAllText(file);
+
         foreach (var line in text.Split('\n'))
         {
-            // "  api:" gibi service başlıklarını yakala
             var t = line.TrimEnd();
             if (t.StartsWith("services:", StringComparison.Ordinal)) continue;
             if (t.StartsWith("#")) continue;
+
             var idx = t.IndexOf(':');
+            // Örn: "  api:" gibi; boşluk içermeyen yalın başlık
             if (idx > 0 && !t.Contains(" "))
             {
                 var n = t[..idx].Trim();
-                if (!string.IsNullOrEmpty(n)) names.Add(n);
+                if (!string.IsNullOrEmpty(n))
+                    names.Add(n);
             }
         }
 

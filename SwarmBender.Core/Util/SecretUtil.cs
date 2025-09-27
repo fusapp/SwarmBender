@@ -6,6 +6,34 @@ namespace SwarmBender.Core.Util;
 
 internal static class SecretUtil
 {
+    
+    public static string BuildExternalName(
+        string? nameTemplate,
+        string stackId,
+        string serviceName,
+        string env,
+        string key,
+        string value,
+        string? versionMode)
+    {
+        // Normalize – HER İKİ tarafta aynı kural:
+        var envNorm = env?.Trim().ToLowerInvariant() ?? "dev";
+        var svcNorm = serviceName?.Trim() ?? "";
+        var keyNorm = key?.Trim() ?? "";
+
+        var versionSuffix = SecretUtil.VersionSuffix(value ?? string.Empty, versionMode);
+
+        // Varolan MakeNameWithDockerFallback mantığını burada topla:
+        return SecretUtil.MakeNameWithDockerFallback(
+            nameTemplate,
+            stackId,
+            svcNorm,
+            envNorm,
+            keyNorm,
+            versionSuffix
+        );
+    }
+    
     public static Regex WildcardToRegex(string pattern)
     {
         var escaped = Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".");

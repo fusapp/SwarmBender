@@ -8,6 +8,7 @@
         <AssemblyName>sb</AssemblyName>
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>sb</ToolCommandName>
+        <PackageId>SwarmBender-Cli</PackageId>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="..\SwarmBender.Core\SwarmBender.Core.csproj" />

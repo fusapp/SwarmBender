@@ -1,4 +1,5 @@
 using SwarmBender.Core.Abstractions;
+using SwarmBender.Core.Yaml;
 using SwarmBender.Core.Yaml.Converters;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -18,13 +19,13 @@ public sealed class YamlEngine : IYamlEngine
         .WithTypeConverter(new ServiceNetworksYamlConverter())
         .WithTypeConverter(new SysctlsYamlConverter())
         .WithTypeConverter(new UlimitsYamlConverter())
-        
+       
         .Build();
 
     private readonly ISerializer _s = new SerializerBuilder()
         .WithNamingConvention(NullNamingConvention.Instance)
         .DisableAliases()
-        .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
+        .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitEmptyCollections | DefaultValuesHandling.OmitNull)
         .WithTypeConverter(new ExternalDefYamlConverter())
         .WithTypeConverter(new ExtraHostsYamlConverter())
         .WithTypeConverter(new ListOrDictYamlConverter())
@@ -33,6 +34,7 @@ public sealed class YamlEngine : IYamlEngine
         .WithTypeConverter(new ServiceNetworksYamlConverter())
         .WithTypeConverter(new SysctlsYamlConverter())
         .WithTypeConverter(new UlimitsYamlConverter())
+        .WithEventEmitter(inner => new QuotingEventEmitter(inner))
         .Build();
 
     public IDictionary<string, object?> LoadToMap(string yamlText)

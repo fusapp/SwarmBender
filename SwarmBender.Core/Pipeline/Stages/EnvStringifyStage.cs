@@ -1,98 +1,80 @@
+using System.Globalization;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
 
-namespace SwarmBender.Core.Pipeline.Stages
+namespace SwarmBender.Core.Pipeline.Stages;
+
+/// <summary>
+/// Environment'ı map yerine list (KEY=VALUE) formatına çevirir.
+/// Böylece YAML'nın bool/number parse etmesi engellenir; tüm env değerleri string olur.
+/// </summary>
+public sealed class EnvStringifyStage : IRenderStage
 {
-    /// <summary>
-    /// Ensures all environment values are strings while keeping the "map" form.
-    /// - If service.Environment is a map: convert every value to string.
-    /// - If service.Environment is a list: parse KEY=VALUE and rebuild a map, values as string.
-    /// This avoids YAML boolean/number typing issues in Compose/Swarm.
-    /// </summary>
-    public sealed class EnvStringifyStage : IRenderStage
+    // TokenExpand (700)'den sonra, Serialize (800)'den önce
+    public int Order => 710;
+
+    public Task ExecuteAsync(RenderContext ctx, CancellationToken ct)
     {
-        // Run after SecretsAttachStage (650). Pick a slightly higher order.
-        public int Order => 710;
-
-        public Task ExecuteAsync(RenderContext ctx, CancellationToken ct)
-        {
-            if (ctx.Working?.Services is null || ctx.Working.Services.Count == 0)
-                return Task.CompletedTask;
-
-            foreach (var (svcName, svc) in ctx.Working.Services)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (svc.Environment is null) continue;
-
-                svc.Environment = NormalizeToStringMap(svc.Environment);
-            }
-
+        var model = ctx.Working;
+        if (model?.Services is null || model.Services.Count == 0)
             return Task.CompletedTask;
-        }
 
-        /// <summary>
-        /// Returns a ListOrDict in "map" form whose values are guaranteed to be strings.
-        /// </summary>
-        private static ListOrDict NormalizeToStringMap(ListOrDict env)
+        foreach (var (svcName, svc) in model.Services)
         {
-            // Case 1: Already a map -> stringify all values
+            ct.ThrowIfCancellationRequested();
+            var env = svc.Environment;
+            if (env is null) continue;
+
+            // 1) Map -> deterministik sırayla KEY=VALUE list'e çevir
             if (env.AsMap is not null)
             {
-                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var kv in env.AsMap)
-                    map[kv.Key] = ToStringValue(kv.Value);
-                return ListOrDict.FromMap(map);
+                var lines = new List<string>(env.AsMap.Count);
+
+                // deterministik çıktı için alfabetik sırala
+                foreach (var kv in env.AsMap.OrderBy(k => k.Key, StringComparer.Ordinal))
+                {
+                    var key = (kv.Key ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(key)) continue;
+
+                    var sval = kv.Value is null
+                        ? string.Empty
+                        : Convert.ToString(kv.Value, CultureInfo.InvariantCulture) ?? string.Empty;
+
+                    lines.Add($"{key}={sval}");
+                }
+
+                svc.Environment = ListOrDict.FromList(lines);
+                continue;
             }
 
-            // Case 2: List (KEY=VALUE) -> parse and rebuild as map (string values)
+            // 2) Zaten list ise normalize et (KEY veya KEY=VAL formatına zorla)
             if (env.AsList is not null)
             {
-                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var item in env.AsList)
+                var outList = new List<string>(env.AsList.Count);
+                foreach (var raw in env.AsList)
                 {
-                    if (string.IsNullOrWhiteSpace(item)) continue;
+                    if (string.IsNullOrWhiteSpace(raw)) continue;
 
-                    var idx = item.IndexOf('=', StringComparison.Ordinal);
+                    var idx = raw.IndexOf('=', StringComparison.Ordinal);
                     if (idx < 0)
                     {
-                        // KEY with empty value
-                        var keyOnly = item.Trim();
-                        if (!string.IsNullOrEmpty(keyOnly))
-                            map[keyOnly] = string.Empty;
+                        // çıplak KEY -> KEY=
+                        var key = raw.Trim();
+                        if (!string.IsNullOrEmpty(key)) outList.Add($"{key}=");
                     }
                     else
                     {
-                        var key = item[..idx].Trim();
-                        var val = item[(idx + 1)..]; // keep as-is (string)
+                        var key = raw[..idx].Trim();
+                        var val = raw[(idx + 1)..]; // string zaten
                         if (!string.IsNullOrEmpty(key))
-                            map[key] = val;
+                            outList.Add($"{key}={val ?? string.Empty}");
                     }
                 }
-                return ListOrDict.FromMap(map);
+
+                svc.Environment = ListOrDict.FromList(outList);
             }
-
-            // Nothing set -> keep as-is
-            return env;
         }
 
-        /// <summary>
-        /// Normalize any object-like value to a string suitable for YAML/Compose.
-        /// NOTE: We deliberately return string so serializer does not emit boolean/number nodes.
-        /// </summary>
-        private static string ToStringValue(string? v)
-        {
-            // Already string
-            if (v is null) return string.Empty;
-
-            // Trim is safe; avoids accidental spaces becoming part of the scalar
-            var s = v.Trim();
-
-            // Optional: canonicalize boolean-ish spellings to lowercase
-            // (purely cosmetic; Compose sees a string either way)
-            if (s.Equals("true", StringComparison.OrdinalIgnoreCase)) return "true";
-            if (s.Equals("false", StringComparison.OrdinalIgnoreCase)) return "false";
-
-            return s;
-        }
+        return Task.CompletedTask;
     }
 }

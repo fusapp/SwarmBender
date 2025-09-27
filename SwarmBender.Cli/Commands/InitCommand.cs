@@ -284,7 +284,7 @@ public sealed class InitCommand : Command<InitCommand.Settings>
             args:
               dockerPath: docker
               dockerHost: unix:///var/run/docker.sock
-          nameTemplate: "sb_{scope}_{env}_{key}_{version}"
+          nameTemplate: "{stackId}_{env}_{key}_{version}"
           versionMode: content-sha
           labels:
             owner: swarmbender

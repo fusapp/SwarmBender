@@ -1,10 +1,10 @@
-
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
 using SwarmBender.Core.Util;
+using System.Linq; // <-- LINQ
 
 namespace SwarmBender.Core.Pipeline.Stages
 {
@@ -23,7 +23,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             if (ctx.Working is null)
                 throw new InvalidOperationException("Working model is null. LoadTemplateStage must run before SecretsAttachStage.");
 
-            var secretize = ctx.Config?.Secretize;
+            var secretize  = ctx.Config?.Secretize;
             var secretsCfg = ctx.Config?.Secrets;
 
             if (secretize is not { Enabled: true } || secretize.Paths is null || secretize.Paths.Count == 0)
@@ -45,32 +45,41 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var envMap = ToDictionary(svc.Environment);
                 if (envMap.Count == 0) continue;
 
-                var matchedKeys = envMap.Keys.Where(k => patterns.Any(rx => rx.IsMatch(k))).ToList();
+                // Match + canonicalize (prefer "__" variant if both "A.B" and "A__B" exist)
+                var matchedRaw = envMap.Keys.Where(k => patterns.Any(rx => rx.IsMatch(k)));
+                var matchedKeys = CanonicalizeKeys(matchedRaw);
+
                 if (matchedKeys.Count == 0) continue;
 
                 svc.Secrets ??= new List<ServiceSecretRef>();
 
                 foreach (var key in matchedKeys)
                 {
-                    
                     var value = envMap[key] ?? string.Empty;
 
                     var versionSuffix = SecretUtil.VersionSuffix(value, secretsCfg?.VersionMode);
-                    var externalName  = SecretUtil.MakeNameWithDockerFallback(secretsCfg?.NameTemplate, ctx.Request.StackId, svcName, ctx.Request.Env, key, versionSuffix);
+                    var externalName  = SecretUtil.MakeNameWithDockerFallback(
+                        secretsCfg?.NameTemplate,
+                        ctx.Request.StackId,
+                        svcName,
+                        ctx.Request.Env,
+                        key,
+                        versionSuffix);
 
                     // Register root external secret (idempotent)
                     if (!ctx.Working.Secrets.ContainsKey(externalName))
                     {
-                        ctx.Working.Secrets[externalName] = new Data.Compose.Secret()
+                        ctx.Working.Secrets[externalName] = new Data.Compose.Secret
                         {
                             // Compose spec: external can be "true" or an object that carries name.
                             // Our ExternalDef.FromName sets AsBool=true and Name=<externalName>.
-                            External = ExternalDef.FromName(externalName),
+                            External = ExternalDef.FromBool(true),
+                            Name = externalName
                             // Secret.Name left null (external name is already carried in External).
                         };
                     }
 
-                    svc.Secrets ??= new List<ServiceSecretRef>();
+                    // Attach once
                     bool alreadyAttached = svc.Secrets.Exists(s =>
                         s.Source.Equals(externalName, StringComparison.OrdinalIgnoreCase));
 
@@ -79,16 +88,26 @@ namespace SwarmBender.Core.Pipeline.Stages
                         svc.Secrets.Add(new ServiceSecretRef
                         {
                             Source = externalName,
-                            Target = null,
+                            Target = key,
                             Mode = 288 // 0440
                         });
                     }
 
+                    // Remove plain env value (do not leak)
                     envMap.Remove(key);
                 }
 
                 // Write back remaining env as map
                 svc.Environment = ListOrDict.FromMap(envMap);
+
+                // Safety: dedupe secret refs by Source
+                if (svc.Secrets.Count > 1)
+                {
+                    svc.Secrets = svc.Secrets
+                        .GroupBy(x => x.Source, StringComparer.OrdinalIgnoreCase)
+                        .Select(g => g.First())
+                        .ToList();
+                }
             }
 
             return Task.CompletedTask;
@@ -125,6 +144,33 @@ namespace SwarmBender.Core.Pipeline.Stages
             return dict;
         }
 
-        
+        // Prefer "__" version if both "A.B" and "A__B" exist.
+        private static List<string> CanonicalizeKeys(IEnumerable<string> keys)
+        {
+            var list = keys.ToList();
+            if (list.Count <= 1) return list;
+
+            var underscoreSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var k in list)
+                if (k.Contains("__"))
+                    underscoreSet.Add(k);
+
+            var result = new List<string>(list.Count);
+            foreach (var k in list)
+            {
+                if (k.Contains('.'))
+                {
+                    var underscoreAlt = k.Replace(".", "__");
+                    if (underscoreSet.Contains(underscoreAlt))
+                        continue; // drop dot-form if __-form exists
+                }
+                result.Add(k);
+            }
+
+            // de-dup case-insensitively
+            return result
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
     }
 }

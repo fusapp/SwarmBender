@@ -76,7 +76,7 @@ public sealed class SecretsSection
     public SecretsEngine Engine { get; init; } = new();
 
     [YamlMember(Alias = "nameTemplate", ApplyNamingConventions = false)]
-    public string NameTemplate { get; init; } = "sb_{scope}_{env}_{key}_{version}";
+    public string NameTemplate { get; init; } = "sb_{stackId}_{env}_{key}_{version}";
 
     [YamlMember(Alias = "versionMode", ApplyNamingConventions = false)]
     public string VersionMode { get; init; } = "content-sha";

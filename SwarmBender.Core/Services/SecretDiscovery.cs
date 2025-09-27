@@ -48,7 +48,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
             foreach (var svc in svcList)
             {
                 var ver = SecretUtil.VersionSuffix(kv.Value, cfg.Secrets.VersionMode);
-                var name = SecretUtil.MakeExternalName(
+                var name = SecretUtil.MakeNameWithDockerFallback(
                     cfg.Secrets.NameTemplate, stackId, svc, env, kv.Key, ver);
 
                 discovered.Add(new DiscoveredSecret($"{stackId}_{svc}", kv.Key, kv.Value, ver, name));

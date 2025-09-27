@@ -56,7 +56,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                     var value = envMap[key] ?? string.Empty;
 
                     var versionSuffix = SecretUtil.VersionSuffix(value, secretsCfg?.VersionMode);
-                    var externalName  = SecretUtil.MakeExternalName(secretsCfg?.NameTemplate, ctx.Request.StackId, svcName, ctx.Request.Env, key, versionSuffix);
+                    var externalName  = SecretUtil.MakeNameWithDockerFallback(secretsCfg?.NameTemplate, ctx.Request.StackId, svcName, ctx.Request.Env, key, versionSuffix);
 
                     // Register root external secret (idempotent)
                     if (!ctx.Working.Secrets.ContainsKey(externalName))

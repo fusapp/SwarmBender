@@ -14,6 +14,7 @@ var app = new CommandApp(new SwarmBenderTypeRegistrar(services));
 app.Configure(cfg =>
 {
     cfg.SetApplicationName("sb");
+    cfg.UseAssemblyInformationalVersion();
     cfg.AddCommand<InitCommand>("init");
     cfg.AddCommand<RenderCommand>("render");
     cfg.AddBranch("secret", b =>

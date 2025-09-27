@@ -264,7 +264,7 @@ public sealed class AzdoPipelineScaffolder : IAzdoPipelineScaffolder
         sb.AppendLine("                ENV_LC=\"$(echo \"${{ parameters.environmentName }}\" | tr '[:upper:]' '[:lower:]')\"");
         if (isMultiTenant) sb.AppendLine("                TENANT_SLUG='${{ parameters.tenantSlug }}'");
         sb.AppendLine("                echo \"[+] Secrets sync for env=${ENV_LC}\"");
-        sb.AppendLine("                sb secrets sync -e \"${ENV_LC}\"");
+        sb.AppendLine($"               sb secret sync {stackId} -e \"${{ENV_LC}}\"");
 
         // Render (export extra params as env)
         sb.AppendLine("          - task: Bash@3");

@@ -40,6 +40,13 @@ app.Configure(cfg =>
             pipeline.AddCommand<AzdoPipelineInitCommand>("init");
         });
     });
+    cfg.AddBranch("doctor", doctor =>
+    {
+        doctor.AddBranch("stage", stage =>
+        {
+            stage.AddCommand<DoctorStageListCommand>("list");
+        });
+    });
 });
 
 return await app.RunAsync(args);

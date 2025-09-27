@@ -32,6 +32,13 @@ app.Configure(cfg =>
             i.AddCommand<InfisicalUploadCommand>("upload").WithDescription("Upload discovered secrets to Infisical using SDK.");
         });
     });
+    cfg.AddBranch("azdo", azdo =>
+    {
+        azdo.AddBranch("pipeline", pipeline =>
+        {
+            pipeline.AddCommand<AzdoPipelineInitCommand>("init");
+        });
+    });
 });
 
 return await app.RunAsync(args);

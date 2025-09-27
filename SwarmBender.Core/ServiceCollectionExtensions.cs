@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using SwarmBender.Core.Abstractions;
+using SwarmBender.Core.Azdo;
 using SwarmBender.Core.Config;
 using SwarmBender.Core.IO;
 using SwarmBender.Core.Pipeline;
@@ -30,6 +31,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IAzureKvCollector, AzureKvCollector>();
         services.AddSingleton<IInfisicalCollector, InfisicalCollector>();
         services.AddSingleton<IInfisicalUploader, InfisicalUploader>();
+        
+        services.AddSingleton<IAzdoPipelineScaffolder, AzdoPipelineScaffolder>();
         
         
         services.AddSingleton<ISecretDiscovery, SecretDiscovery>();

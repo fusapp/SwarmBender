@@ -28,6 +28,7 @@ namespace SwarmBender.Core.Pipeline.Stages
         {
             var dirs = new List<string>
             {
+                $"stacks/all/common/env",
                 $"stacks/all/{ctx.Request.Env}/env",
                 $"stacks/{ctx.Request.StackId}/{ctx.Request.Env}/env"
             };

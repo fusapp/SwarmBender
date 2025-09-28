@@ -48,6 +48,11 @@ public sealed class SecretSyncCommand : AsyncCommand<SecretSyncCommand.Settings>
         foreach (var sec in found.OrderBy(x => x.ExternalName, StringComparer.OrdinalIgnoreCase))
         {
             if (existing.Contains(sec.ExternalName)) continue;
+            if (string.IsNullOrEmpty(sec.Value))
+            {
+                AnsiConsole.MarkupLine($"[yellow]Warning:[/] skip empty secret: {sec.ExternalName} (key={sec.Key})");
+                continue;
+            }
             if (s.DryRun)
                 AnsiConsole.MarkupLine(
                     $"[grey]create[/] {sec.ExternalName} {(s.ShowValues ? $"= [dim]{Markup.Escape(sec.Value)}[/]" : "")}");

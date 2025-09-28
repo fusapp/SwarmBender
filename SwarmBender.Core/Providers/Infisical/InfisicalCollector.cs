@@ -9,9 +9,10 @@ public sealed class InfisicalCollector : IInfisicalCollector
 {
     /// <summary>
     /// Infisical’dan sırları toplar:
-    /// - routes.readPaths (varsa) üzerinden ÇOKLU path okur; yoksa {stackId}_all fallback.
-    /// - include -> replace -> keyTemplate sırasını uygular.
-    /// Auth: Universal Auth (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET)
+    /// - routes.readPaths (varsa) üzerinden çoklu path okur; yoksa PathTemplate + "{stackId}_all" fallback.
+    /// - include eşleşmesini hem orijinal hem de replace edilmiş formlarda yapar.
+    /// - replace -> keyTemplate uygular; ÇIKTI anahtarı compose kanonuna çevirir ('.' -> '__').
+    /// Auth: Universal Auth (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET).
     /// </summary>
     public async Task<Dictionary<string, string>> CollectAsync(
         ProvidersInfisical cfg, string stackId, string env, CancellationToken ct)
@@ -19,7 +20,7 @@ public sealed class InfisicalCollector : IInfisicalCollector
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (cfg is null || !cfg.Enabled) return result;
 
-        // env 'dev'/'prod' haritalaması
+        // env haritalaması (dev/prod vs)
         var envSlug = (cfg.EnvMap != null && cfg.EnvMap.TryGetValue(env, out var mapped) && !string.IsNullOrWhiteSpace(mapped))
             ? mapped : env;
 
@@ -36,27 +37,24 @@ public sealed class InfisicalCollector : IInfisicalCollector
 
         await client.Auth().UniversalAuth().LoginAsync(clientId, clientSecret).ConfigureAwait(false);
 
-        // 1) Okunacak path listesini çıkar
+        // 1) Okunacak path listesi
         var readPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         if (cfg.Routes is { Count: > 0 })
         {
             foreach (var r in cfg.Routes)
                 if (r.ReadPaths is { Count: > 0 })
                     foreach (var rp in r.ReadPaths)
-                        readPaths.Add(BuildPath(cfg.PathTemplate, stackId, envSlug, rp)); // absolute ise direkt döner
+                        readPaths.Add(BuildPath(cfg.PathTemplate, stackId, envSlug, rp));
         }
-
-        // fallback: PathTemplate + {stackId}_all
         if (readPaths.Count == 0)
             readPaths.Add(BuildPath(cfg.PathTemplate, stackId, envSlug, "{stackId}_all"));
 
-        // include patternleri
+        // 2) include desenleri (boşsa tümü)
         var includes = (cfg.Include != null && cfg.Include.Count > 0)
             ? cfg.Include
             : new List<string> { "*" };
 
-        // 2) Her path için ListAsync + birleştir
+        // 3) Her path’i tara → birleştir (last-wins)
         foreach (var rp in readPaths)
         {
             ct.ThrowIfCancellationRequested();
@@ -78,9 +76,10 @@ public sealed class InfisicalCollector : IInfisicalCollector
             {
                 secrets = await client.Secrets().ListAsync(options).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
-                // path yok/erişilemedi: sessizce geç
+                // path yok/erişilemedi → kısa uyarı ve devam
+                System.Console.Error.WriteLine($"[infisical] skip path '{secretPath}' env='{envSlug}': {ex.Message}");
                 continue;
             }
 
@@ -90,15 +89,40 @@ public sealed class InfisicalCollector : IInfisicalCollector
             {
                 ct.ThrowIfCancellationRequested();
 
-                var key = s.SecretKey ?? string.Empty;
-                var val = s.SecretValue ?? string.Empty;
+                var keyOrig = s.SecretKey ?? string.Empty;   // Infisical anahtarı
+                var val     = s.SecretValue ?? string.Empty;
 
-                if (!includes.Any(p => Globber.IsMatch(key, p)))
-                    continue;
+                // ——— include eşleşmesi (4 varyasyon) ———
+                // key varyasyonları
+                var keyRepl     = ApplyReplace(cfg.Replace, keyOrig);              // "__" -> "_" gibi
+                var keyRev      = ReverseDoubleUnderscore(keyOrig, cfg);           // "_" -> "__" (geri çevirme)
+                var keyRevRepl  = ApplyReplace(cfg.Replace, keyRev);
 
-                // replace + keyTemplate
-                var mappedKey = ApplyReplace(cfg.Replace, key);
-                var finalKey = (cfg.KeyTemplate ?? "{key}").Replace("{key}", mappedKey);
+                bool included = false;
+                foreach (var patt in includes)
+                {
+                    // pattern varyasyonları
+                    var pattOrig = patt;
+                    var pattRepl = ApplyReplace(cfg.Replace, pattOrig);
+
+                    if (Globber.IsMatch(keyOrig, pattOrig) ||
+                        Globber.IsMatch(keyRev, pattOrig)  ||
+                        Globber.IsMatch(keyRepl, pattRepl) ||
+                        Globber.IsMatch(keyRevRepl, pattRepl))
+                    {
+                        included = true;
+                        break;
+                    }
+                }
+                if (!included) continue;
+
+                // ——— anahtar üretimi: replace + keyTemplate ———
+                var mappedKey = keyRepl; // replace sonrası key
+                var templated = (cfg.KeyTemplate ?? "{key}").Replace("{key}", mappedKey);
+
+                // ÇIKTI: "__" geri çevir + compose kanonu ('.' -> '__')
+                var reversed = ReverseDoubleUnderscore(templated, cfg);
+                var finalKey = SecretUtil.ToComposeCanon(reversed);
 
                 // last-wins
                 result[finalKey] = val;
@@ -110,13 +134,20 @@ public sealed class InfisicalCollector : IInfisicalCollector
 
     // ---- helpers ----
 
+    private static string ReverseDoubleUnderscore(string input, ProvidersInfisical cfg)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+        // cfg.Replace["__"] örn "_" ise, geri çevir: "_" -> "__"
+        if (cfg.Replace != null && cfg.Replace.TryGetValue("__", out var token) && !string.IsNullOrEmpty(token))
+            return input.Replace(token, "__");
+        return input;
+    }
+
     private static string BuildPath(string? template, string stackId, string envSlug, string scopeOrPath)
     {
-        // Absolute path ise doğrudan kullan (örn: "/shared/db")
         if (!string.IsNullOrWhiteSpace(scopeOrPath) && scopeOrPath.StartsWith("/"))
             return scopeOrPath;
 
-        // Değilse template uygula (default: "/{stackId}_all")
         var t = string.IsNullOrWhiteSpace(template) ? "/{stackId}_all" : template;
         t = t.Replace("{stackId}", stackId, StringComparison.OrdinalIgnoreCase)
              .Replace("{env}", envSlug, StringComparison.OrdinalIgnoreCase)
@@ -130,7 +161,6 @@ public sealed class InfisicalCollector : IInfisicalCollector
         if (string.IsNullOrWhiteSpace(p)) return "/";
         var s = p.Trim();
         if (!s.StartsWith("/")) s = "/" + s;
-        // // -> / normalize
         s = System.Text.RegularExpressions.Regex.Replace(s, "/{2,}", "/");
         return s;
     }

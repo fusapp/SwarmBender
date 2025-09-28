@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Compose;
 using SwarmBender.Core.Util;
-using System.Linq; // <-- LINQ
+using System.Linq;
 
 namespace SwarmBender.Core.Pipeline.Stages
 {
@@ -36,7 +36,7 @@ namespace SwarmBender.Core.Pipeline.Stages
             // root-level secrets dict must be Dictionary<string, Secret>
             ctx.Working.Secrets ??= new Dictionary<string, Data.Compose.Secret>(StringComparer.OrdinalIgnoreCase);
 
-            var patterns = secretize.Paths.Select(SecretUtil.WildcardToRegex).ToArray();
+            var matchers = secretize.Paths.Select(SecretUtil.WildcardToRegex).ToArray();
 
             foreach (var (svcName, svc) in services)
             {
@@ -45,18 +45,29 @@ namespace SwarmBender.Core.Pipeline.Stages
                 var envMap = ToDictionary(svc.Environment);
                 if (envMap.Count == 0) continue;
 
-                // Match + canonicalize (prefer "__" variant if both "A.B" and "A__B" exist)
-                var matchedRaw  = envMap.Keys.Where(k => patterns.Any(rx => rx.IsMatch(k)));
-                var matchedKeys = SecretUtil.CanonicalizeKeys(matchedRaw);
+                // 1) Eşleşen key'leri topla: hem orijinal hem kanonik form matcher'dan geçebilir
+                var matchedRaw = envMap.Keys.Where(k =>
+                {
+                    var canon = SecretUtil.ToComposeCanon(k);
+                    return matchers.Any(rx => rx.IsMatch(k)) || matchers.Any(rx => rx.IsMatch(canon));
+                });
 
+                // 2) "." ve "__" varyantı birlikteyse "__" olanı tercih et
+                var matchedKeys = SecretUtil.CanonicalizeKeys(matchedRaw);
                 if (matchedKeys.Count == 0) continue;
 
                 svc.Secrets ??= new List<ServiceSecretRef>();
 
                 foreach (var key in matchedKeys)
                 {
-                    var value = envMap[key] ?? string.Empty;
                     var keyCanon = SecretUtil.ToComposeCanon(key);
+
+                    // Değeri güvenli al: önce orijinal, yoksa kanonik
+                    string value = string.Empty;
+                    if (!envMap.TryGetValue(key, out value) && !envMap.TryGetValue(keyCanon, out value))
+                        value = string.Empty;
+
+                    // External secret adı (service adı template'e bağlı olarak kullanılabilir/ kullanılmayabilir)
                     var externalName = SecretUtil.BuildExternalName(
                         secretsCfg?.NameTemplate,
                         ctx.Request.StackId,
@@ -67,20 +78,17 @@ namespace SwarmBender.Core.Pipeline.Stages
                         secretsCfg?.VersionMode
                     );
 
-                    // Register root external secret (idempotent)
+                    // Root-level external secret kaydı (idempotent)
                     if (!ctx.Working.Secrets.ContainsKey(externalName))
                     {
                         ctx.Working.Secrets[externalName] = new Data.Compose.Secret
                         {
-                            // Compose spec: external can be "true" or an object that carries name.
-                            // Our ExternalDef.FromName sets AsBool=true and Name=<externalName>.
                             External = ExternalDef.FromBool(true),
                             Name = externalName
-                            // Secret.Name left null (external name is already carried in External).
                         };
                     }
 
-                    // Attach once
+                    // Servise bir kez ekle (Source'e göre)
                     bool alreadyAttached = svc.Secrets.Exists(s =>
                         s.Source.Equals(externalName, StringComparison.OrdinalIgnoreCase));
 
@@ -89,20 +97,20 @@ namespace SwarmBender.Core.Pipeline.Stages
                         svc.Secrets.Add(new ServiceSecretRef
                         {
                             Source = externalName,
-                            Target = keyCanon,
+                            Target = keyCanon, // compose kanonu → runtime'da file olarak /run/secrets/<Target>
                             Mode = 288 // 0440
                         });
                     }
 
-                    // Remove plain env value (do not leak)
+                    // Ortamdan sızdırmayı engelle: hem orijinal hem kanonik anahtarı temizle
                     envMap.Remove(key);
                     envMap.Remove(keyCanon);
                 }
 
-                // Write back remaining env as map
+                // Kalan env'i geriye yaz
                 svc.Environment = ListOrDict.FromMap(envMap);
 
-                // Safety: dedupe secret refs by Source
+                // Güvenlik: secret referanslarını Source'a göre tekilleştir
                 if (svc.Secrets.Count > 1)
                 {
                     svc.Secrets = svc.Secrets
@@ -145,8 +153,5 @@ namespace SwarmBender.Core.Pipeline.Stages
 
             return dict;
         }
-
-        // Prefer "__" version if both "A.B" and "A__B" exist.
-        
     }
 }

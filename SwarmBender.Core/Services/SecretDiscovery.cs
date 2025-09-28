@@ -24,13 +24,13 @@ public sealed class SecretDiscovery : ISecretDiscovery
     public async Task<IReadOnlyList<DiscoveredSecret>> DiscoverAsync(
         string repoRoot, string stackId, string env, SbConfig cfg, CancellationToken ct)
     {
-        // Render ile aynı normalizasyon
+        // 0) Render ile aynı normalizasyon
         env = env?.Trim().ToLowerInvariant() ?? "dev";
 
-        // 1) Env torbasını düzleştir
+        // 1) Env torbasını düzleştir (file/env/kv/infisical sırasıyla)
         var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct);
 
-        // 2) Secretize filtreleri
+        // 2) Secretize filtreleri yoksa biter
         var secretize = cfg.Secretize;
         if (secretize is not { Enabled: true } || secretize.Paths is null || secretize.Paths.Count == 0)
             return Array.Empty<DiscoveredSecret>();
@@ -41,26 +41,26 @@ public sealed class SecretDiscovery : ISecretDiscovery
         var serviceNames = TryLoadServiceNames(repoRoot, stackId);
         var targets = serviceNames.Count > 0 ? serviceNames : new List<string> { "all" };
 
-        // 4) Keşif — Stage ile birebir aynı isimlendirme/kanonikleştirme
+        // 4) Keşif — SecretsAttachStage ile birebir aynı kanonik/isimlendirme
         var discovered = new List<DiscoveredSecret>();
         var seenExternal = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // önce eşleşenleri bul (hem orijinal anahtar hem kanonik form match edebilir)
+        // Hem orijinal hem kanonik isim matcher’dan geçebilir
         var matchedRaw = envBag.Keys.Where(k =>
         {
             var canon = SecretUtil.ToComposeCanon(k);
             return matchers.Any(rx => rx.IsMatch(k)) || matchers.Any(rx => rx.IsMatch(canon));
         });
 
-        // aynı key’in "." ve "__" varyantı varsa "__" olanı tercih et
+        // "." ve "__" varyantları birlikteyse "__" olanı tercih et
         var matchedKeys = SecretUtil.CanonicalizeKeys(matchedRaw);
 
         foreach (var key in matchedKeys)
         {
             ct.ThrowIfCancellationRequested();
 
-            var keyCanon = SecretUtil.ToComposeCanon(key);
-            // değeri hem orijinal hem kanonik isimde arayıp ilk bulunanı al
+            var keyCanon = SecretUtil.ToComposeCanon(key); // compose formu (ENV/TARGET için)
+            // Değeri, orijinal anahtarda yoksa kanonik eşdeğerinde ara
             var hasVal = envBag.TryGetValue(key, out var val) || envBag.TryGetValue(keyCanon, out val);
             var value = hasVal ? (val ?? string.Empty) : string.Empty;
 
@@ -71,23 +71,23 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     stackId,
                     svc,
                     env,
-                    keyCanon,        
-                    value ?? string.Empty,
+                    keyCanon,
+                    value,
                     cfg.Secrets?.VersionMode
                 );
 
-                // aynı external adı bir kez
+                // Aynı external adı bir kez ekle
                 if (!seenExternal.Add(externalName))
                     continue;
 
-                var versionSuffix = SecretUtil.VersionSuffix(value ?? string.Empty, cfg.Secrets?.VersionMode);
+                var versionSuffix = SecretUtil.VersionSuffix(value, cfg.Secrets?.VersionMode);
 
                 discovered.Add(new DiscoveredSecret(
                     Scope: $"{stackId}_{svc}",
-                    Key: keyCanon,
-                    Value: value ?? string.Empty,
+                    Key: keyCanon,              // compose kanonu → service target ile birebir
+                    Value: value,
                     Version: versionSuffix,
-                    ExternalName: externalName
+                    ExternalName: externalName  // <stackId>_<keyExternal>[_{version}]
                 ));
             }
         }
@@ -112,6 +112,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
                 dirs.Add(d.Replace("{stackId}", stackId).Replace("{env}", env));
         }
 
+        // 1) Dosya kaynakları
         foreach (var dir in dirs)
         {
             foreach (var f in _fs.GlobFiles(root, $"{dir}/*.json").OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
@@ -122,7 +123,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
             }
         }
 
-        // Provider toplama sırası
+        // 2) Sağlayıcı sırası
         var order = cfg.Providers.Order?.Select(o => o.Type).ToList()
                     ?? new List<string> { "file", "env", "azure-kv", "infisical" };
 
@@ -142,6 +143,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     break;
                 case "infisical":
                     if (cfg.Providers.Infisical is { Enabled: true } inf)
+                        // Infisical collector, yeni imzada stackId + env alıyor
                         foreach (var it in await _inf.CollectAsync(inf, stackId, env, ct))
                             bag[it.Key] = it.Value;
                     break;
@@ -183,7 +185,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
         static void Emit(string key, string val, IDictionary<string, string> sink)
         {
             if (string.IsNullOrEmpty(key)) return;
-            // hem "A.B" hem "A__B" ekle (discovery & stage uyumlu)
+            // Hem "A.B" hem "A__B" ekle (Discovery & Stage uyumlu)
             sink[key] = val;
             sink[key.Replace(".", "__")] = val;
         }

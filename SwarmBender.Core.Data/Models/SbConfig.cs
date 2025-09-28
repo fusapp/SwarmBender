@@ -75,11 +75,42 @@ public sealed class SecretsSection
     [YamlMember(Alias = "engine", ApplyNamingConventions = false)]
     public SecretsEngine Engine { get; init; } = new();
 
+    /// <summary>
+    /// Dış secret adı şablonu.
+    /// Varsayılan: "{stackId}_{key}{_version}"
+    /// Not: {_version} placeholder'ı varsa ve version boş değilse başına "_" koyarak eklenir.
+    /// </summary>
     [YamlMember(Alias = "nameTemplate", ApplyNamingConventions = false)]
-    public string NameTemplate { get; init; } = "sb_{stackId}_{env}_{key}_{version}";
+    public string NameTemplate { get; init; } = "{stackId}_{key}{_version}";
 
+    /// <summary>
+    /// Secret version üretimi: "content-sha" | "v1" | "" (kapalı).
+    /// </summary>
     [YamlMember(Alias = "versionMode", ApplyNamingConventions = false)]
     public string VersionMode { get; init; } = "content-sha";
+
+    /// <summary>
+    /// Servis içi target adı için şablon. Varsayılan compose kanonu (ConnectionStrings__MSSQL__Master).
+    /// Örn: "{key_compose}" veya "{key_flat}".
+    /// </summary>
+    [YamlMember(Alias = "targetTemplate", ApplyNamingConventions = false)]
+    public string TargetTemplate { get; init; } = "{key_compose}";
+
+    /// <summary>
+    /// Anahtar kanonikleştirme modu:
+    /// "compose" => '.' yerine "__" (env var/compose uyumlu)
+    /// "flat"    => '.' ile hiyerarşi (örn. appsettings tarzı)
+    /// </summary>
+    [YamlMember(Alias = "canonicalization", ApplyNamingConventions = false)]
+    public string Canonicalization { get; init; } = "compose";
+
+    /// <summary>
+    /// stackId gibi ön eklerin nasıl üretileceğini kontrol eder.
+    /// Varsayılan: "{stackId}"
+    /// Gerekirse "{company}", "{env}" vb token'larla zenginleştirilebilir.
+    /// </summary>
+    [YamlMember(Alias = "scopeTemplate", ApplyNamingConventions = false)]
+    public string ScopeTemplate { get; init; } = "{stackId}";
 
     [YamlMember(Alias = "labels", ApplyNamingConventions = false)]
     public Dictionary<string, string> Labels { get; init; } = new()
@@ -168,7 +199,7 @@ public sealed class ProvidersAzureKv
     {
         ["__"] = "--"
     };
-    
+
     [YamlMember(Alias = "routes", ApplyNamingConventions = false)]
     public List<SecretRouteRule> Routes { get; init; } = new();
 }
@@ -210,7 +241,7 @@ public sealed class ProvidersInfisical
         "Redis__*",
         "Mongo__*"
     };
-    
+
     [YamlMember(Alias = "routes", ApplyNamingConventions = false)]
     public List<SecretRouteRule> Routes { get; init; } = new();
 }

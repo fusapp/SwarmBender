@@ -103,6 +103,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
         // stacks/all/{env}/env + stacks/{stackId}/{env}/env + extra
         var dirs = new List<string>
         {
+            "stacks/all/common/env",
             $"stacks/all/{env}/env",
             $"stacks/{stackId}/{env}/env"
         };

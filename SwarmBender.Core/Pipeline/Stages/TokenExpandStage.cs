@@ -15,7 +15,10 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// <summary>
     /// Expands token placeholders on the typed compose model.
     /// Supported patterns: ${NAME} and {{NAME}}.
-    /// Sources: SB_* defaults + config.tokens.user (user overrides).
+    /// Sources (precedence low → high):
+    ///  1) SB_* defaults (SB_STACK_ID, SB_ENV)
+    ///  2) config.tokens.user (defaults you set in repo)
+    ///  3) Process environment (AzDO pipeline env) — overrides previous
     /// Service-specific token SB_SERVICE_NAME is injected per service.
     /// </summary>
     public sealed class TokenExpandStage : IRenderStage
@@ -92,7 +95,6 @@ namespace SwarmBender.Core.Pipeline.Stages
                     svc.Healthcheck.Interval    = ReplaceTokens(svc.Healthcheck.Interval, tokens);
                     svc.Healthcheck.Timeout     = ReplaceTokens(svc.Healthcheck.Timeout, tokens);
                     svc.Healthcheck.StartPeriod = ReplaceTokens(svc.Healthcheck.StartPeriod, tokens);
-                    // Retries is int?; token expansion not applicable.
                 }
 
                 // volumes (mounts) – textual fields only
@@ -102,7 +104,6 @@ namespace SwarmBender.Core.Pipeline.Stages
                     {
                         m.Source = ReplaceTokens(m.Source, tokens);
                         m.Target = ReplaceTokens(m.Target, tokens);
-                        // If you add more string fields later, expand here.
                     }
                 }
 
@@ -157,8 +158,6 @@ namespace SwarmBender.Core.Pipeline.Stages
                         if (att.Aliases is not null)
                             ExpandStringList(att.Aliases, tokens);
 
-                        // If ServiceNetworkAttachment has other string fields (e.g., ipv4_address),
-                        // expand them here similarly:
                         att.Ipv4Address = ReplaceTokens(att.Ipv4Address, tokens);
                         att.Ipv6Address = ReplaceTokens(att.Ipv6Address, tokens);
                     }
@@ -194,15 +193,28 @@ namespace SwarmBender.Core.Pipeline.Stages
         // ------------ helpers ------------
         private static Dictionary<string, string> BuildTokens(RenderContext ctx)
         {
+            // 1) SB_* defaults
             var bag = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["SB_STACK_ID"] = ctx.Request.StackId,
                 ["SB_ENV"]      = ctx.Request.Env,
             };
+
+            // 2) repo defaults (tokens.user)
             if (ctx.Config?.Tokens?.User is { Count: > 0 })
+            {
                 foreach (var kv in ctx.Config.Tokens.User)
                     if (!string.IsNullOrWhiteSpace(kv.Key))
                         bag[kv.Key] = kv.Value ?? string.Empty;
+            }
+
+            // 3) Process environment (AzDO pipeline env) — overrides previous
+            foreach (DictionaryEntry de in Environment.GetEnvironmentVariables())
+            {
+                if (de.Key is string k)
+                    bag[k] = de.Value?.ToString() ?? string.Empty;
+            }
+
             return bag;
         }
 
@@ -244,12 +256,10 @@ namespace SwarmBender.Core.Pipeline.Stages
                     var eq = item.IndexOf('=', StringComparison.Ordinal);
                     if (eq < 0)
                     {
-                        // bare item: tümü expand
                         list[i] = ReplaceTokens(item, tokens);
                     }
                     else
                     {
-                        // "KEY=VALUE": hem key hem value expand
                         var key = item[..eq];
                         var val = item[(eq + 1)..];
                         var newKey = ReplaceTokens(key, tokens) ?? key;

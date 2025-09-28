@@ -98,7 +98,7 @@ namespace SwarmBender.Core.Pipeline.Stages
                         {
                             Source = externalName,
                             Target = keyCanon, // compose kanonu → runtime'da file olarak /run/secrets/<Target>
-                            Mode = 288 // 0440
+                            Mode = 292 // 0444
                         });
                     }
 

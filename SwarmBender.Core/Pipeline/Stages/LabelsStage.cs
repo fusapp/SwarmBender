@@ -15,6 +15,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// - Merge policy: last-wins.
     /// Writes back in **list style** ("- key=value") to preserve compose list syntax.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class LabelsStage : IRenderStage
     {
         public int Order => 600;

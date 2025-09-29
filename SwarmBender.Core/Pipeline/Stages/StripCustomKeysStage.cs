@@ -10,6 +10,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// - Clears Service.X_Sb_Groups
     /// - Removes any "x-sb" entry from ComposeNode.Custom at root and services
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class StripCustomKeysStage : IRenderStage
     {
         public int Order => 790; // after TokenExpand(700), before Serialize(800)

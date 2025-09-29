@@ -16,6 +16,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// plus any extra directories from SbConfig.Providers.File.ExtraJsonDirs.
     /// Files are flattened (dot + double-underscore forms) and merged (last-wins).
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class EnvJsonCollectStage : IRenderStage
     {
         public int Order => 300;
@@ -144,8 +145,8 @@ namespace SwarmBender.Core.Pipeline.Stages
         {
             if (string.IsNullOrEmpty(dottedKey)) return;
             // Sadece A__B__C üret
-            var dd = dottedKey.Replace('.', '_'); // A_B_C
-            dd = dd.Replace("_", "__");           // A__B__C
+            var dd = dottedKey.Replace(".", "__"); // A_B_C
+            //dd = dd.Replace("_", "__");           // A__B__C
             sink[dd] = value;
         }
     }

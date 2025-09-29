@@ -21,6 +21,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     ///  3) Process environment (AzDO pipeline env) — overrides previous
     /// Service-specific token SB_SERVICE_NAME is injected per service.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class TokenExpandStage : IRenderStage
     {
         public int Order => 700;

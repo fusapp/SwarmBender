@@ -3,6 +3,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Models;
+using SwarmBender.Core.Pipeline;
 
 namespace SwarmBender.Cli.Commands;
 
@@ -49,7 +50,7 @@ public sealed class RenderCommand : AsyncCommand<RenderCommand.Settings>
             WriteHistory: s.WriteHistory
         );
 
-        var res = await _orch.RunAsync(req, CancellationToken.None);
+        var res = await _orch.RunAsync(req, PipelineMode.StackRender, CancellationToken.None);
         AnsiConsole.MarkupLine("[green]Rendered.[/] Output: {0}", res.OutFile);
         return 0;
     }

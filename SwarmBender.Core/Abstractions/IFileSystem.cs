@@ -7,4 +7,6 @@ public interface IFileSystem
     IEnumerable<string> GlobFiles(string root, string pattern); // supports basic glob (*, ?, [abc])
     bool FileExists(string path);
     void EnsureDirectory(string path);
+    void MoveFile(string source, string destination, bool overwrite = false);
+    void DeleteFile(string path);
 }

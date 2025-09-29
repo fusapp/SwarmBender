@@ -7,4 +7,7 @@ public sealed record RenderRequest(
     string AppSettingsMode,   // "env" | "config" (kept for future stages)
     string OutDir,
     bool   WriteHistory
-);
+)
+{
+   
+}

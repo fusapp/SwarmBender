@@ -47,6 +47,12 @@ app.Configure(cfg =>
             stage.AddCommand<DoctorStageListCommand>("list");
         });
     });
+    cfg.AddBranch("config", (config) =>
+    {
+        config.AddCommand<ConfigExportCommand>("export")
+            .WithDescription("Export merged appsettings.json (tokens & envvars expanded)");
+    });
+   
 });
 
 return await app.RunAsync(args);

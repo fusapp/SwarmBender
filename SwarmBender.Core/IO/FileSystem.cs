@@ -32,4 +32,22 @@ public sealed class FileSystem : IFileSystem
     public bool FileExists(string path) => File.Exists(path);
 
     public void EnsureDirectory(string path) => Directory.CreateDirectory(path);
+    
+    public void MoveFile(string source, string destination, bool overwrite = false)
+    {
+        var dir = Path.GetDirectoryName(destination);
+        if (!string.IsNullOrWhiteSpace(dir))
+            Directory.CreateDirectory(dir);
+
+        if (overwrite && File.Exists(destination))
+            File.Delete(destination);
+
+        File.Move(source, destination);
+    }
+
+    public void DeleteFile(string path)
+    {
+        if (File.Exists(path))
+            File.Delete(path);
+    }
 }

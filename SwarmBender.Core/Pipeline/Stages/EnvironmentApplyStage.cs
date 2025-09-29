@@ -11,6 +11,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// Applies the aggregated environment bag (ctx.Env) to each service's environment (ListOrDict).
     /// Merge rule is last-wins: ctx.Env overrides existing entries with the same key.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class EnvironmentApplyStage : IRenderStage
     {
         public int Order => 500;

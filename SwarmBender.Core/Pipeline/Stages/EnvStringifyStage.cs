@@ -8,6 +8,7 @@ namespace SwarmBender.Core.Pipeline.Stages;
 /// Environment'ı map yerine list (KEY=VALUE) formatına çevirir.
 /// Böylece YAML'nın bool/number parse etmesi engellenir; tüm env değerleri string olur.
 /// </summary>
+[StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
 public sealed class EnvStringifyStage : IRenderStage
 {
     // TokenExpand (700)'den sonra, Serialize (800)'den önce

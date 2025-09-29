@@ -13,6 +13,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// Also writes a timestamped history copy when config says so.
     /// Sets ctx.OutFilePath and ctx.HistoryFilePath accordingly.
     /// </summary>
+    [StageUsage(PipelineMode.StackRender)]
     public sealed class SerializeStage : IRenderStage
     {
         public int Order => 800;

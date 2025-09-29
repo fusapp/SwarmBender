@@ -18,6 +18,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     ///  - Shallow-merges all top-level nodes EXCEPT Services (Services are handled above).
     /// Files are applied in the order they are discovered for each pattern; last applied wins.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class ApplyOverlaysStage : IRenderStage
     {
         public int Order => 200;

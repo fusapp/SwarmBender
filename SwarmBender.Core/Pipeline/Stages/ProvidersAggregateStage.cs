@@ -18,6 +18,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     ///   file (already handled by EnvJsonCollectStage) -> env -> azure-kv -> infisical
     /// Providers merge with last-wins semantics.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class ProvidersAggregateStage : IRenderStage
     {
         public int Order => 400;

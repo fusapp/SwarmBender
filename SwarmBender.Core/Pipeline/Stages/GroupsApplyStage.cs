@@ -15,6 +15,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     ///   stacks/{stackId}/{env}/groups/{group}/service.yml(a)
     /// Order per service = order in x-sb-groups; within a group: all/* first, then stack/*; last wins.
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class GroupsApplyStage : IRenderStage
     {
         public int Order => 350;

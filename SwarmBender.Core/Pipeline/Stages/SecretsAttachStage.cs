@@ -14,6 +14,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// - Creates root-level external secrets using nameTemplate/versionMode.
     /// - Attaches secret references to affected services (last-wins).
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class SecretsAttachStage : IRenderStage
     {
         public int Order => 650;

@@ -10,6 +10,7 @@ namespace SwarmBender.Core.Pipeline.Stages
     /// Loads stacks/{stackId}/docker-stack.template.yml(a), deserializes into the typed compose model,
     /// assigns it to ctx.Template, and initializes ctx.Working as an independent clone (by re-deserializing).
     /// </summary>
+    [StageUsage(PipelineMode.ConfigExport, PipelineMode.StackRender)]
     public sealed class LoadTemplateStage : IRenderStage
     {
         public int Order => 100;

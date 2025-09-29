@@ -52,6 +52,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IRenderStage, StripCustomKeysStage>();
         services.AddSingleton<IRenderStage, SerializeStage>();
         services.AddSingleton<IRenderStage, EnvStringifyStage>();
+        services.AddSingleton<IRenderStage, ConfigExportStage>();
 
         return services;
     }

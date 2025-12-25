@@ -4,6 +4,7 @@ using Spectre.Console.Cli;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Models;
 using SwarmBender.Core.Pipeline;
+using SwarmBender.Core.Util;
 
 namespace SwarmBender.Cli.Commands;
 
@@ -37,21 +38,53 @@ public sealed class RenderCommand : AsyncCommand<RenderCommand.Settings>
         [Description("Appsettings mode: env|config (default env).")]
         [CommandOption("--appsettings-mode <MODE>")]
         public string AppSettingsMode { get; init; } = "env";
+
+        public override ValidationResult Validate()
+        {
+            try
+            {
+                InputValidator.ValidateStackId(StackId);
+                InputValidator.ValidateEnvironment(Env);
+                InputValidator.ValidateRootPath(Root);
+                InputValidator.ValidateAppSettingsMode(AppSettingsMode);
+                return ValidationResult.Success();
+            }
+            catch (ArgumentException ex)
+            {
+                return ValidationResult.Error(ex.Message);
+            }
+        }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
     {
-        var req = new RenderRequest(
-            RootPath: s.Root,
-            StackId: s.StackId,
-            Env: s.Env,
-            AppSettingsMode: s.AppSettingsMode,
-            OutDir: s.OutDir,
-            WriteHistory: s.WriteHistory
-        );
+        try
+        {
+            var validatedRoot = InputValidator.ValidateRootPath(s.Root);
+            var validatedOutDir = InputValidator.ValidateOutputDir(s.OutDir, validatedRoot);
 
-        var res = await _orch.RunAsync(req, PipelineMode.StackRender, CancellationToken.None);
-        AnsiConsole.MarkupLine("[green]Rendered.[/] Output: {0}", res.OutFile);
-        return 0;
+            var req = new RenderRequest(
+                RootPath: validatedRoot,
+                StackId: s.StackId,
+                Env: s.Env,
+                AppSettingsMode: s.AppSettingsMode,
+                OutDir: s.OutDir,
+                WriteHistory: s.WriteHistory
+            );
+
+            var res = await _orch.RunAsync(req, PipelineMode.StackRender, CancellationToken.None).ConfigureAwait(false);
+            AnsiConsole.MarkupLine("[green]Rendered.[/] Output: {0}", res.OutFile);
+            return 0;
+        }
+        catch (ArgumentException ex)
+        {
+            AnsiConsole.MarkupLine("[red]Validation error:[/] {0}", Markup.Escape(ex.Message));
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine("[red]Error:[/] {0}", Markup.Escape(ex.Message));
+            return 1;
+        }
     }
 }

@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Spectre.Console.Cli;
 using SwarmBender.Cli;
 using SwarmBender.Cli.Commands;
@@ -6,9 +7,16 @@ using SwarmBender.Core;
 using SwarmBender.Core.Abstractions;
 
 var services = new ServiceCollection()
+    .AddLogging(builder =>
+    {
+        builder.SetMinimumLevel(LogLevel.Warning);
+        builder.AddConsole(options =>
+        {
+            options.LogToStandardErrorThreshold = LogLevel.Warning;
+        });
+    })
     .AddSwarmBenderCore(Directory.GetCurrentDirectory())
-    .AddSingleton<IOutput,ConsoleOutput>()
-    ;
+    .AddSingleton<IOutput, ConsoleOutput>();
 
 var app = new CommandApp(new SwarmBenderTypeRegistrar(services));
 app.Configure(cfg =>

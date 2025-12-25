@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Models;
 using SwarmBender.Core.Providers.Azure;
@@ -13,22 +14,26 @@ public sealed class SecretDiscovery : ISecretDiscovery
     private readonly IFileSystem _fs;
     private readonly IAzureKvCollector _kv;
     private readonly IInfisicalCollector _inf;
+    private readonly ILogger<SecretDiscovery> _logger;
 
-    public SecretDiscovery(IFileSystem fs, IAzureKvCollector kv, IInfisicalCollector inf)
+    public SecretDiscovery(IFileSystem fs, IAzureKvCollector kv, IInfisicalCollector inf, ILogger<SecretDiscovery> logger)
     {
         _fs = fs;
         _kv = kv;
         _inf = inf;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<DiscoveredSecret>> DiscoverAsync(
         string repoRoot, string stackId, string env, SbConfig cfg, CancellationToken ct)
     {
+        _logger.LogDebug("Starting secret discovery for stack={StackId}, env={Env}", stackId, env);
+
         // 0) Render ile aynı normalizasyon
         env = env?.Trim().ToLowerInvariant() ?? "dev";
 
         // 1) Env torbasını düzleştir (file/env/kv/infisical sırasıyla)
-        var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct);
+        var envBag = await CollectEnvAsync(repoRoot, stackId, env, cfg, ct).ConfigureAwait(false);
 
         // 2) Secretize filtreleri yoksa biter
         var secretize = cfg.Secretize;
@@ -92,6 +97,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
             }
         }
 
+        _logger.LogInformation("Discovered {Count} secrets for stack={StackId}, env={Env}", discovered.Count, stackId, env);
         return discovered;
     }
 
@@ -118,7 +124,7 @@ public sealed class SecretDiscovery : ISecretDiscovery
         {
             foreach (var f in _fs.GlobFiles(root, $"{dir}/*.json").OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
             {
-                var json = await _fs.ReadAllTextAsync(Path.Combine(root, f), ct);
+                var json = await _fs.ReadAllTextAsync(Path.Combine(root, f), ct).ConfigureAwait(false);
                 using var doc = JsonDocument.Parse(json);
                 FlattenJson(doc.RootElement, null, bag);
             }
@@ -139,13 +145,13 @@ public sealed class SecretDiscovery : ISecretDiscovery
                     break;
                 case "azure-kv":
                     if (cfg.Providers.AzureKv is { Enabled: true } akv)
-                        foreach (var it in await _kv.CollectAsync(akv, $"{stackId}/{env}", ct))
+                        foreach (var it in await _kv.CollectAsync(akv, $"{stackId}/{env}", ct).ConfigureAwait(false))
                             bag[it.Key] = it.Value;
                     break;
                 case "infisical":
                     if (cfg.Providers.Infisical is { Enabled: true } inf)
                         // Infisical collector, yeni imzada stackId + env alıyor
-                        foreach (var it in await _inf.CollectAsync(inf, stackId, env, ct))
+                        foreach (var it in await _inf.CollectAsync(inf, stackId, env, ct).ConfigureAwait(false))
                             bag[it.Key] = it.Value;
                     break;
             }

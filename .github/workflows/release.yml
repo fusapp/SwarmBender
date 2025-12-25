@@ -48,11 +48,22 @@ jobs:
           echo "VERSION=$VER" >> "$GITHUB_ENV"
           echo "Resolved VERSION=$VER"
 
-      - name: Restore (CLI)
-        run: dotnet restore ./SwarmBender.Cli/SwarmBender.Cli.csproj
+      - name: Restore (All)
+        run: dotnet restore ./SwarmBender.sln
 
-      - name: Build (CLI)
-        run: dotnet build ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-restore
+      - name: Build (All)
+        run: dotnet build ./SwarmBender.sln -c Release --no-restore
+
+      - name: Run Tests
+        run: dotnet test ./SwarmBender.sln -c Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          retention-days: 7
 
       - name: Pack (CLI as tool)
         run: dotnet pack ./SwarmBender.Cli/SwarmBender.Cli.csproj -c Release --no-build -o ./nupkgs /p:Version=${{ env.VERSION }}

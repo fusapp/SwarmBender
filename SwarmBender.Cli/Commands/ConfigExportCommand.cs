@@ -4,10 +4,11 @@ using Spectre.Console.Cli;
 using SwarmBender.Core.Abstractions;
 using SwarmBender.Core.Data.Models;
 using SwarmBender.Core.Pipeline;
+using SwarmBender.Core.Util;
 
 namespace SwarmBender.Cli.Commands;
 
-public class ConfigExportCommand : AsyncCommand<ConfigExportCommand.Settings>
+public sealed class ConfigExportCommand : AsyncCommand<ConfigExportCommand.Settings>
 {
     public sealed class Settings : CommandSettings
     {
@@ -30,6 +31,21 @@ public class ConfigExportCommand : AsyncCommand<ConfigExportCommand.Settings>
         [CommandOption("--no-history")]
         [Description("Do not write history artifacts")]
         public bool NoHistory { get; init; }
+
+        public override ValidationResult Validate()
+        {
+            try
+            {
+                InputValidator.ValidateStackId(StackId);
+                InputValidator.ValidateEnvironment(Env);
+                InputValidator.ValidateRootPath(Root);
+                return ValidationResult.Success();
+            }
+            catch (ArgumentException ex)
+            {
+                return ValidationResult.Error(ex.Message);
+            }
+        }
     }
 
     private readonly IRenderOrchestrator _orchestrator;
@@ -43,59 +59,73 @@ public class ConfigExportCommand : AsyncCommand<ConfigExportCommand.Settings>
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings s)
     {
-        var ct = CancellationToken.None;
-
-        // RenderRequest: history’yi kapatma seçeneği
-        var request = new RenderRequest
-        (
-            RootPath: s.Root,
-            StackId: s.StackId,
-            Env: s.Env,
-            WriteHistory: !s.NoHistory,
-            AppSettingsMode: "env",
-            // OutDir: ConfigExportStage içinde kullanılacak. 
-            // Eğer -o verilmişse, oranın klasörüne yazdırırız:
-            OutDir: ResolveOutDir(s)
-        );
-
-        AnsiConsole.MarkupLine(
-            $"[grey]Config export starting:[/] stack=[yellow]{s.StackId}[/], env=[yellow]{s.Env}[/], out=[yellow]{request.OutDir}[/]");
-
-        // ConfigExport modunda çalıştır
-        var result = await _orchestrator.RunAsync(request, PipelineMode.ConfigExport, ct);
-
-        if (string.IsNullOrWhiteSpace(result.OutFile) || !_fs.FileExists(result.OutFile))
+        try
         {
-            AnsiConsole.MarkupLine("[red]Export failed: no output file produced.[/]");
-            return -1;
-        }
+            var ct = CancellationToken.None;
+            var validatedRoot = InputValidator.ValidateRootPath(s.Root);
 
-        // -o/--out istenmişse sonradan yeniden adlandır/taşı
-        if (!string.IsNullOrWhiteSpace(s.OutFile))
+            // RenderRequest: history'yi kapatma seçeneği
+            var request = new RenderRequest
+            (
+                RootPath: validatedRoot,
+                StackId: s.StackId,
+                Env: s.Env,
+                WriteHistory: !s.NoHistory,
+                AppSettingsMode: "env",
+                // OutDir: ConfigExportStage içinde kullanılacak.
+                // Eğer -o verilmişse, oranın klasörüne yazdırırız:
+                OutDir: ResolveOutDir(s, validatedRoot)
+            );
+
+            AnsiConsole.MarkupLine(
+                $"[grey]Config export starting:[/] stack=[yellow]{s.StackId}[/], env=[yellow]{s.Env}[/], out=[yellow]{request.OutDir}[/]");
+
+            // ConfigExport modunda çalıştır
+            var result = await _orchestrator.RunAsync(request, PipelineMode.ConfigExport, ct).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(result.OutFile) || !_fs.FileExists(result.OutFile))
+            {
+                AnsiConsole.MarkupLine("[red]Export failed: no output file produced.[/]");
+                return 1;
+            }
+
+            // -o/--out istenmişse sonradan yeniden adlandır/taşı
+            if (!string.IsNullOrWhiteSpace(s.OutFile))
+            {
+                var desired = Path.GetFullPath(s.OutFile!);
+                var desiredDir = Path.GetDirectoryName(desired)!;
+                _fs.EnsureDirectory(desiredDir);
+
+                // overwrite semantics: mevcutsa sil
+                if (_fs.FileExists(desired))
+                    _fs.DeleteFile(desired);
+
+                _fs.MoveFile(result.OutFile, desired);
+                AnsiConsole.MarkupLine($"[green]Exported:[/] {desired}");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[green]Exported:[/] {result.OutFile}");
+            }
+
+            return 0;
+        }
+        catch (ArgumentException ex)
         {
-            var desired = Path.GetFullPath(s.OutFile!);
-            var desiredDir = Path.GetDirectoryName(desired)!;
-            _fs.EnsureDirectory(desiredDir);
-
-            // overwrite semantics: mevcutsa sil
-            if (_fs.FileExists(desired))
-                _fs.DeleteFile(desired);
-
-            _fs.MoveFile(result.OutFile, desired);
-            AnsiConsole.MarkupLine($"[green]Exported:[/] {desired}");
+            AnsiConsole.MarkupLine("[red]Validation error:[/] {0}", Markup.Escape(ex.Message));
+            return 1;
         }
-        else
+        catch (Exception ex)
         {
-            AnsiConsole.MarkupLine($"[green]Exported:[/] {result.OutFile}");
+            AnsiConsole.MarkupLine("[red]Error:[/] {0}", Markup.Escape(ex.Message));
+            return 1;
         }
-
-        return 0;
     }
 
-    private string ResolveOutDir(Settings s)
+    private static string ResolveOutDir(Settings s, string validatedRoot)
     {
         if (string.IsNullOrWhiteSpace(s.OutFile))
-            return Path.Combine(s.Root, "ops", "state", "last"); // mevcut varsayımla uyumlu
+            return Path.Combine(validatedRoot, "ops", "state", "last"); // mevcut varsayımla uyumlu
 
         // -o verildiyse OutDir = hedef klasör
         var full = Path.GetFullPath(s.OutFile!);
